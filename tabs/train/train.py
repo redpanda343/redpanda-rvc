@@ -612,7 +612,7 @@ def train_tab():
             step=1,
             label=i18n("Silent training files"),
             info=i18n(
-                "Adding several silent files to the training set enables the model to handle pure silence in inferred audio files. Select 0 if your dataset is clean and already contains segments of pure silence."
+                "Adding several silent files to the training set enables the model to handle pure silence in inferred audio files. 2 is fine for 5-10 minute datasets"
             ),
             value=True,
             interactive=True,
