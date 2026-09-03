@@ -31,7 +31,7 @@ def pull_updates():
             env=git_environment,
         ).stdout.strip()
         result = subprocess.run(
-            [*git_command, "pull", "--ff-only"],
+            [*git_command, "pull", "--ff-only", "--autostash"],
             timeout=60,
             env=git_environment,
         )
