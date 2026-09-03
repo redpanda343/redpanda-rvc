@@ -970,7 +970,7 @@ def train_and_evaluate(
                 os.path.join(experiment_dir, "D_" + checkpoint_suffix),
                 scaler,
             )
-            if custom_save_every_weights:
+            if custom_save_every_weights and save_every_steps == 0:
                 model_add.append(
                     os.path.join(
                         experiment_dir, f"{model_name}_{epoch}e_{global_step}s.pth"

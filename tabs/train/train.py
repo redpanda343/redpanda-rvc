@@ -712,7 +712,7 @@ def train_tab():
                     save_every_weights = gr.Checkbox(
                         label=i18n("Save Every Weights"),
                         info=i18n(
-                            "This setting enables you to save the weights of the model at the conclusion of each epoch."
+                            "Saves an inference model at each epoch checkpoint interval when step-based inference saving is disabled."
                         ),
                         value=True,
                         interactive=True,
@@ -724,7 +724,7 @@ def train_tab():
                         step=1,
                         label=i18n("Save Inference Model Every X Steps"),
                         info=i18n(
-                            "Saves an inference-only model every X training steps. Set to 0 to disable."
+                            "Saves an inference-only model every X training steps. Values above 0 disable epoch-based inference model saves."
                         ),
                         interactive=True,
                     )
