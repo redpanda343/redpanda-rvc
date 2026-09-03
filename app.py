@@ -51,7 +51,7 @@ def pull_updates():
         return
 
     if before != after:
-        print("Applio was updated. Restarting...")
+        print("Redpanda-rvc was updated. Restarting...")
         git_environment["APPLIO_AUTO_PULL_DONE"] = "1"
         os.execve(sys.executable, [sys.executable, *sys.argv], git_environment)
 
@@ -488,7 +488,7 @@ new MutationObserver(updateNormalizationLabels).observe(document.body, {
 
 # Define Gradio interface
 with gr.Blocks(
-    title="Applio",
+    title="Redpanda-rvc",
     **(
         {
             "theme": my_applio,
