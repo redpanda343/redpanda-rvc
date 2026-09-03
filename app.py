@@ -500,7 +500,7 @@ with gr.Blocks(
 ) as Applio:
     with gr.Row(elem_id="applio-header"):
         with gr.Column(elem_id="applio-intro", scale=5):
-            gr.Markdown("## redpanda-rvc", elem_id="applio-title")
+            gr.Markdown("## Redpanda-rvc", elem_id="applio-title")
             gr.Markdown(
                 i18n(
                     "A simple, high-quality voice conversion tool focused on ease of use and performance."
