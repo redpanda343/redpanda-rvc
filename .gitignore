@@ -21,8 +21,10 @@ assets/audios
 assets/datasets
 assets/config.json
 
-logs
-rvc/models
+logs/*
+!logs/.gitkeep
+rvc/models/*
+!rvc/models/.gitkeep
 env
 venv
 .venv
