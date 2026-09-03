@@ -1,0 +1,21 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python syntax
+        run: python -c "import ast, pathlib; files = list(pathlib.Path('.').rglob('*.py')); [ast.parse(path.read_text(encoding='utf-8'), filename=str(path)) for path in files]; print(f'Validated {len(files)} Python files')"
+      - name: Validate JSON syntax
+        run: python -c "import json, pathlib; files = list(pathlib.Path('.').rglob('*.json')); [json.loads(path.read_text(encoding='utf-8')) for path in files]; print(f'Validated {len(files)} JSON files')"
