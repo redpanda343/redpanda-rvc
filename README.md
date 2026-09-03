@@ -17,10 +17,10 @@ This project is a fork of [Applio](https://github.com/IAHispano/Applio), with ch
 - **Adjusted WebUI descriptions** — Some vague descriptions have been clarified.
 - **FLAC support** — Supports training with FLAC files.
 - **Small tweaks to algorithm** — Now fully match [Mainline RVC](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) behavior.
-- **Small tweaks to training script — D is frozen during G steps.
-- **Deterministic inference — You can now use a deterministic seed for inference.
-- **Checkpoint Exporter — Convert G files to inference weights in the WebUI.
-- **Same SR model blending — Voice blender can now merge models that don't share the same sampling rate.
+- **Small tweaks to training script** — D is frozen during G steps.
+- **Deterministic inference** — You can now use a deterministic seed for inference.
+- **Checkpoint Exporter** — Convert G files to inference weights in the WebUI.
+- **Same SR model blending** — Voice blender can now merge models that don't share the same sampling rate.
  
 ## Credits
 
