@@ -361,6 +361,15 @@ def train_tab():
                 gr.Info(result)
         return result
 
+    def _index_with_toast(*args):
+        gr.Info(i18n("Generating index..."))
+        result = run_index_script(*args)
+        if isinstance(result, str):
+            if "error" in result.lower() or "failed" in result.lower():
+                gr.Warning(result)
+            else:
+                gr.Info(result)
+
     # Model settings section
     with gr.Accordion(i18n("Model Settings")):
         with gr.Row():
@@ -821,7 +830,7 @@ def train_tab():
         def start_training(*args):
             message = start_train_script(*args)
             gr.Info(message)
-            return (message, *training_ui_state(args[0]))
+            return training_ui_state(args[0])
 
         def training_ui_state(selected_model):
             state = get_train_state(selected_model)
@@ -830,26 +839,31 @@ def train_tab():
             is_running = status == "running"
             is_paused = status == "paused"
             is_active = status in {"running", "paused", "stopping"}
+
+            if status == "idle":
+                display_message = "Training is idle"
+            elif status == "running":
+                display_message = "Training is running"
+            elif status == "paused":
+                display_message = "Training paused"
+            elif status == "stopped":
+                display_message = "Training stopped"
+            else:
+                display_message = message
+
             return (
                 gr.update(visible=not is_active),
                 gr.update(visible=is_running),
                 gr.update(visible=is_paused),
                 gr.update(visible=is_active),
-                f"{status.capitalize()}: {message}",
+                display_message,
             )
 
         def control_training(action, selected_model):
             message = action(selected_model)
             gr.Info(message)
-            return (message, *training_ui_state(selected_model))
+            return training_ui_state(selected_model)
 
-        train_output_info = gr.Textbox(
-            label=i18n("Output Information"),
-            info=i18n("The output information will be displayed here."),
-            value="",
-            max_lines=8,
-            interactive=False,
-        )
         training_status_info = gr.Textbox(
             label=i18n("Training Status"),
             value=i18n("Training is idle"),
@@ -870,9 +884,9 @@ def train_tab():
 
             index_button = gr.Button(i18n("Generate Index"))
             index_button.click(
-                fn=run_index_script,
+                fn=_index_with_toast,
                 inputs=[model_name, index_algorithm],
-                outputs=[train_output_info],
+                outputs=[],
             )
 
     # Export Model section
@@ -1041,7 +1055,6 @@ def train_tab():
                 outputs=[upload_pretrained],
             )
             training_outputs = [
-                train_output_info,
                 train_button,
                 pause_train_button,
                 resume_train_button,
