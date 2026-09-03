@@ -852,7 +852,7 @@ def train_tab():
         )
         training_status_info = gr.Textbox(
             label=i18n("Training Status"),
-            value=i18n("Idle: Training is idle."),
+            value=i18n("Training is idle"),
             max_lines=2,
             interactive=False,
         )
