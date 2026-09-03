@@ -20,7 +20,7 @@ This project is a fork of [Applio](https://github.com/IAHispano/Applio), with ch
 - **Small tweaks to training script** — D is frozen during G steps.
 - **Deterministic inference** — You can now use a deterministic seed for inference.
 - **Checkpoint Exporter** — Convert G files to inference weights in the WebUI.
-- **Same SR model blending** — Voice blender can now merge models that don't share the same sampling rate.
+- **Different SR model blending** — Voice blender can now merge models that don't share the same sampling rate.
  
 ## Credits
 
