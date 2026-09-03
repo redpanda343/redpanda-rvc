@@ -2,10 +2,10 @@ import concurrent.futures
 import json
 import multiprocessing
 import os
+import shutil
 import subprocess
 import sys
 import time
-
 
 def strtobool(val):
     """Convert a string representation of truth to a bool."""
@@ -106,7 +106,14 @@ def clear_flac_preprocess_artifacts(exp_dir: str):
 
 def _ffmpeg_path():
     bundled_ffmpeg = os.path.join(now_directory, "ffmpeg.exe")
-    return bundled_ffmpeg if os.path.isfile(bundled_ffmpeg) else "ffmpeg"
+    if os.name == "nt" and os.path.isfile(bundled_ffmpeg):
+        return bundled_ffmpeg
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def _clean_audio_path(file: str) -> str:
