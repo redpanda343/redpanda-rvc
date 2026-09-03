@@ -1,7 +1,63 @@
 # Make sure the config file exists
 import os
 import shutil
+import subprocess
 import sys
+
+
+def pull_updates():
+    if os.environ.get("APPLIO_AUTO_PULL_DONE") == "1":
+        return
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.exists(os.path.join(repo_dir, ".git")) or not shutil.which("git"):
+        return
+
+    git_command = ["git"]
+    if os.name == "nt":
+        git_command.extend(["-c", "http.sslBackend=openssl"])
+    git_command.extend(["-C", repo_dir])
+
+    git_environment = os.environ.copy()
+    git_environment["GIT_TERMINAL_PROMPT"] = "0"
+
+    try:
+        before = subprocess.run(
+            [*git_command, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+            env=git_environment,
+        ).stdout.strip()
+        result = subprocess.run(
+            [*git_command, "pull", "--ff-only"],
+            timeout=60,
+            env=git_environment,
+        )
+        if result.returncode != 0:
+            print("Update failed. Starting the current version.")
+            return
+        after = subprocess.run(
+            [*git_command, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+            env=git_environment,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"Update failed. Starting the current version: {error}")
+        return
+
+    if before != after:
+        print("Applio was updated. Restarting...")
+        git_environment["APPLIO_AUTO_PULL_DONE"] = "1"
+        os.execve(sys.executable, [sys.executable, *sys.argv], git_environment)
+
+
+if __name__ == "__main__":
+    pull_updates()
 
 # We need the CWD for finding the config file, but while we're at it, add it to sys.path
 now_dir = os.getcwd()
