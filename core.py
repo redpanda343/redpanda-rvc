@@ -322,12 +322,13 @@ def run_multi_model_infer_script(
     infer_pipeline = import_voice_converter()
     audio, chunks, intervals = infer_pipeline.prepare_audio(input_path, split_audio)
     input_name = os.path.splitext(os.path.basename(input_path))[0][:80]
-    output_paths = []
+    audio_results = []
     failures = []
     used_names = {}
 
     for model_path, index_path in zip(model_paths, index_paths):
-        model_name = os.path.splitext(os.path.basename(model_path))[0][:80]
+        model_label = os.path.splitext(os.path.basename(model_path))[0]
+        model_name = model_label[:80]
         output_name = f"{input_name}_{model_name}_output"
         name_key = output_name.lower()
         used_names[name_key] = used_names.get(name_key, 0) + 1
@@ -356,14 +357,14 @@ def run_multi_model_infer_script(
                 _prepared_chunks=chunks,
                 _prepared_intervals=intervals,
             )
-            output_paths.append(exported_path)
+            audio_results.append((model_label, exported_path))
         except Exception as error:
             failures.append(f"{os.path.basename(model_path)}: {error}")
 
-    summary = f"Converted {len(output_paths)} of {len(model_paths)} models."
+    summary = f"Converted {len(audio_results)} of {len(model_paths)} models."
     if failures:
         summary += " Failed: " + "; ".join(failures)
-    return summary, output_paths
+    return summary, audio_results
 
 
 # Preprocess

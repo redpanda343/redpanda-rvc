@@ -1619,16 +1619,26 @@ def inference_tab():
             )
 
         convert_button_multi = gr.Button(i18n("Convert"))
+        multi_audio_results = gr.State([])
         with gr.Row():
             vc_output_multi_info = gr.Textbox(
                 label=i18n("Output Information"),
                 info=i18n("The output information will be displayed here."),
             )
-            vc_output_multi_files = gr.File(
-                label=i18n("Export Audios"),
-                file_count="multiple",
-                type="filepath",
-            )
+            with gr.Column():
+                @gr.render(inputs=multi_audio_results)
+                def render_multi_audio_results(audio_results):
+                    if not audio_results:
+                        gr.Markdown(i18n("Converted model audios will appear here."))
+                    for position, (model_name, audio_path) in enumerate(audio_results):
+                        gr.Audio(
+                            value=audio_path,
+                            label=f"{model_name}: audio",
+                            type="filepath",
+                            editable=False,
+                            buttons=["download"],
+                            key=(position, audio_path),
+                        )
 
     def convert_audio_multi_model(
         pitch,
@@ -2083,7 +2093,7 @@ def inference_tab():
             multi_sid,
             multi_seed,
         ],
-        outputs=[vc_output_multi_info, vc_output_multi_files],
+        outputs=[vc_output_multi_info, multi_audio_results],
     )
     convert_button_batch.click(
         fn=enable_stop_convert_button,
