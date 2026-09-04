@@ -80,9 +80,10 @@ from rvc.lib.platform import platform_config
 platform_config()
 
 import argparse
-import types
-import gradio as gr
 import logging
+import types
+
+import gradio as gr
 
 DEFAULT_SERVER_NAME = "127.0.0.1"
 DEFAULT_PORT = 6969
@@ -546,14 +547,21 @@ with gr.Blocks(
 
 
 
-def launch_gradio(server_name: str, server_port: int) -> None:
-    app, _, _ = Applio.launch(
+def launch_gradio(server_name: str, server_port: int, auth=None) -> None:
+    if auth is None:
+        from rvc.lib.tools.web_auth import build_launch_auth
+
+        auth = build_launch_auth(server_name, _has_share)
+    app, local_url, share_url = Applio.launch(
         favicon_path="assets/ICON.ico",
         share=_has_share,
-        inbrowser=_has_open,
+        inbrowser=False,
         server_name=server_name,
         server_port=server_port,
         js=APP_JS,
+        auth=auth,
+        auth_message="Sign in to access this Redpanda-rvc instance.",
+        prevent_thread_lock=True,
         **(
             {
                 "theme": my_applio,
@@ -563,51 +571,30 @@ def launch_gradio(server_name: str, server_port: int) -> None:
             else {}
         ),
     )
+    from rvc.lib.tools.tensorboard_proxy import register_tensorboard_proxy
 
-    # Mount TensorBoard proxy so it's accessible from any origin
-    from rvc.lib.tools.launch_tensorboard import get_tb_url
-    import httpx
-    from fastapi import Request, Response
+    try:
+        register_tensorboard_proxy(app)
+        if _has_open:
+            import webbrowser
 
-    @app.api_route(
-        "/tensorboard/{path:path}",
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-    )
-    @app.api_route(
-        "/tensorboard",
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-    )
-    async def tb_proxy(request: Request, path: str = ""):
-        tb_url = get_tb_url()
-        if not tb_url:
-            return Response("TensorBoard not started", status_code=503)
-        url = f"{tb_url.rstrip('/')}/{path}"
-        if request.url.query:
-            url = f"{url}?{request.url.query}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.request(
-                method=request.method,
-                url=url,
-                headers={
-                    k: v
-                    for k, v in request.headers.items()
-                    if k.lower() not in ["host"]
-                },
-                content=await request.body(),
-            )
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            media_type=resp.headers.get("content-type"),
-        )
+            webbrowser.open(share_url or local_url)
+        Applio.block_thread()
+    except Exception:
+        Applio.close()
+        raise
+
 
 if __name__ == "__main__":
+    from rvc.lib.tools.web_auth import build_launch_auth
+
     port = _args.port
     server = _args.server_name
+    launch_credentials = build_launch_auth(server, _has_share)
 
     for _ in range(MAX_PORT_ATTEMPTS):
         try:
-            launch_gradio(server, port)
+            launch_gradio(server, port, launch_credentials)
             break
         except OSError:
             print(
