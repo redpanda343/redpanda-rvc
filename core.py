@@ -42,6 +42,14 @@ def import_voice_converter():
     return VoiceConverter()
 
 
+def clear_inference_cuda_graph(enabled):
+    if enabled:
+        return
+    infer_pipeline = import_voice_converter()
+    if infer_pipeline.vc is not None:
+        infer_pipeline.vc.cuda_graph_manager.set_enabled(False)
+
+
 @lru_cache(maxsize=1)
 def get_config():
     from rvc.configs.config import Config
@@ -104,6 +112,7 @@ def run_infer_script(
     delay_mix: float = 0.5,
     sid: int = 0,
     seed: int = 0,
+    use_cuda_graph: bool = False,
 ):
     seed = resolve_inference_seed(seed)
     kwargs = {
@@ -160,6 +169,7 @@ def run_infer_script(
         "delay_mix": delay_mix,
         "sid": sid,
         "seed": seed,
+        "use_cuda_graph": use_cuda_graph,
     }
     infer_pipeline = import_voice_converter()
     infer_pipeline.convert_audio(**kwargs)
@@ -223,6 +233,7 @@ def run_batch_infer_script(
     delay_mix: float = 0.5,
     sid: int = 0,
     seed: int = 0,
+    use_cuda_graph: bool = False,
 ):
     seed = resolve_inference_seed(seed)
     kwargs = {
@@ -279,6 +290,7 @@ def run_batch_infer_script(
         "delay_mix": delay_mix,
         "sid": sid,
         "seed": seed,
+        "use_cuda_graph": use_cuda_graph,
     }
     infer_pipeline = import_voice_converter()
     infer_pipeline.convert_audio_batch(**kwargs)

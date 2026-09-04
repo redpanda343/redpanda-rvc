@@ -442,7 +442,7 @@ class RMVPE0Predictor:
         cents_mapping = 20 * np.arange(N_CLASS) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))
 
-    def mel2hidden(self, mel):
+    def mel2hidden(self, mel, cuda_graph_manager=None):
         """
         Converts Mel-spectrogram features to hidden representation.
 
@@ -456,7 +456,15 @@ class RMVPE0Predictor:
             mel = F.pad(
                 mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="constant"
             )
-            hidden = self.model(mel)
+            if cuda_graph_manager is None:
+                hidden = self.model(mel)
+            else:
+                hidden = cuda_graph_manager.run(
+                    self.model,
+                    "rmvpe-network",
+                    self.model,
+                    mel,
+                )
         return hidden[:, :n_frames]
 
     def decode(self, hidden, thred=0.03):
@@ -472,7 +480,7 @@ class RMVPE0Predictor:
         f0[f0 == 10] = 0
         return f0
 
-    def infer_from_audio(self, audio, thred=0.03):
+    def infer_from_audio(self, audio, thred=0.03, cuda_graph_manager=None):
         """
         Infers F0 from audio.
 
@@ -481,8 +489,16 @@ class RMVPE0Predictor:
             thred (float, optional): Threshold for salience. Defaults to 0.03.
         """
         audio = torch.from_numpy(audio).float().to(self.device).unsqueeze(0)
-        mel = self.mel_extractor(audio, center=True)
-        hidden = self.mel2hidden(mel)
+        if cuda_graph_manager is None:
+            mel = self.mel_extractor(audio, center=True)
+        else:
+            mel = cuda_graph_manager.run(
+                self.mel_extractor,
+                "rmvpe-mel-center-1",
+                lambda input_audio: self.mel_extractor(input_audio, center=True),
+                audio,
+            )
+        hidden = self.mel2hidden(mel, cuda_graph_manager=cuda_graph_manager)
         hidden = hidden.squeeze(0).cpu().numpy()
         f0 = self.decode(hidden, thred=thred)
         return f0

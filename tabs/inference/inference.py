@@ -10,6 +10,7 @@ import torch
 
 from assets.i18n.i18n import I18nAuto
 from core import (
+    clear_inference_cuda_graph,
     run_batch_infer_script,
     run_infer_script,
     run_multi_model_batch_infer_script,
@@ -557,6 +558,14 @@ def inference_tab():
                     value=False,
                     interactive=True,
                 )
+                use_cuda_graph = gr.Checkbox(
+                    label=i18n("CUDA Graph"),
+                    info=i18n(
+                        "Capture repeated inference shapes. Larger GPUs automatically include feature and pitch stages. Uses additional VRAM and falls back safely."
+                    ),
+                    value=False,
+                    interactive=True,
+                )
                 seed = gr.Textbox(
                     label=i18n("Seed"),
                     info=i18n(
@@ -1064,6 +1073,14 @@ def inference_tab():
                         "Split the audio into chunks for inference to obtain better results in some cases."
                     ),
                     visible=True,
+                    value=False,
+                    interactive=True,
+                )
+                use_cuda_graph_batch = gr.Checkbox(
+                    label=i18n("CUDA Graph"),
+                    info=i18n(
+                        "Capture repeated inference shapes. Larger GPUs automatically include feature and pitch stages. Uses additional VRAM and falls back safely."
+                    ),
                     value=False,
                     interactive=True,
                 )
@@ -2298,6 +2315,16 @@ def inference_tab():
         inputs=[],
         outputs=[embedder_model_custom_batch],
     )
+    use_cuda_graph.change(
+        fn=clear_inference_cuda_graph,
+        inputs=[use_cuda_graph],
+        outputs=[],
+    )
+    use_cuda_graph_batch.change(
+        fn=clear_inference_cuda_graph,
+        inputs=[use_cuda_graph_batch],
+        outputs=[],
+    )
     convert_button1.click(
         fn=convert_audio,
         inputs=[
@@ -2354,6 +2381,7 @@ def inference_tab():
             delay_mix,
             sid,
             seed,
+            use_cuda_graph,
         ],
         outputs=[vc_output1, vc_output2],
     )
@@ -2417,6 +2445,7 @@ def inference_tab():
             delay_mix_batch,
             sid_batch,
             seed_batch,
+            use_cuda_graph_batch,
         ],
         outputs=[vc_output3],
     ).then(
