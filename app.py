@@ -553,7 +553,7 @@ def launch_gradio(server_name: str, server_port: int, auth=None) -> None:
 
         auth = build_launch_auth(server_name, _has_share)
     app, local_url, share_url = Applio.launch(
-        favicon_path="assets/ICON.ico",
+        favicon_path="assets/applio_mascot.png",
         share=_has_share,
         inbrowser=False,
         server_name=server_name,
