@@ -351,7 +351,6 @@ class VoiceConverter:
         resample_sr: int = 0,
         sid: int = 0,
         seed: int = None,
-        use_cuda_graph: bool = False,
         **kwargs,
     ):
         """
@@ -436,7 +435,6 @@ class VoiceConverter:
                 version=self.version,
                 protect=protect,
                 inference_rng=inference_rng,
-                use_cuda_graph=use_cuda_graph,
             )
             converted_chunks.append(audio_opt)
             if split_audio:
@@ -601,8 +599,6 @@ class VoiceConverter:
         """
         Cleans up the model and releases resources.
         """
-        if self.vc is not None:
-            self.vc.cuda_graph_manager.clear()
         if self.hubert_model is not None:
             del self.net_g, self.n_spk, self.vc, self.hubert_model, self.tgt_sr
             self.hubert_model = self.net_g = self.n_spk = self.vc = self.tgt_sr = None
@@ -658,7 +654,6 @@ class VoiceConverter:
             previous_vc = self.vc
             self.vc = VC(self.tgt_sr, self.config)
             if previous_vc is not None:
-                previous_vc.cuda_graph_manager.clear()
                 for predictor_name in ("model_rmvpe", "model_fcpe"):
                     if hasattr(previous_vc, predictor_name):
                         setattr(

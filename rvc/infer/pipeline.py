@@ -13,7 +13,6 @@ sys.path.append(now_dir)
 
 from rvc.lib.predictors.f0 import FCPE, RMVPE
 from rvc.infer.pm import extract_pm
-from rvc.infer.cuda_graph import CUDAGraphManager
 
 import logging
 
@@ -76,7 +75,6 @@ class Pipeline:
         self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
         self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
         self.device = config.device
-        self.cuda_graph_manager = CUDAGraphManager()
 
     def get_f0(
         self,
@@ -84,7 +82,6 @@ class Pipeline:
         p_len,
         f0_method: str = "rmvpe",
         pitch: int = 0,
-        use_cuda_graph: bool = False,
     ):
         """
         Estimates the fundamental frequency (F0) of a given audio signal using various methods.
@@ -112,17 +109,7 @@ class Pipeline:
                     sample_rate=self.sample_rate,
                     hop_size=self.window,
                 )
-            graph_manager = (
-                self.cuda_graph_manager
-                if use_cuda_graph
-                and self.cuda_graph_manager.allows_stage("pitch", self.device)
-                else None
-            )
-            f0 = self.model_rmvpe.get_f0(
-                x,
-                filter_radius=0.03,
-                cuda_graph_manager=graph_manager,
-            )
+            f0 = self.model_rmvpe.get_f0(x, filter_radius=0.03)
         elif f0_method == "fcpe":
             if not hasattr(self, "model_fcpe"):
                 self.model_fcpe = FCPE(
@@ -130,18 +117,7 @@ class Pipeline:
                     sample_rate=self.sample_rate,
                     hop_size=self.window,
                 )
-            graph_manager = (
-                self.cuda_graph_manager
-                if use_cuda_graph
-                and self.cuda_graph_manager.allows_stage("pitch", self.device)
-                else None
-            )
-            f0 = self.model_fcpe.get_f0(
-                x,
-                p_len,
-                filter_radius=0.006,
-                cuda_graph_manager=graph_manager,
-            )
+            f0 = self.model_fcpe.get_f0(x, p_len, filter_radius=0.006)
         else:
             raise ValueError(f"Unsupported pitch extraction method: {f0_method}")
 
@@ -175,7 +151,6 @@ class Pipeline:
         version,
         protect,
         inference_rng=None,
-        use_cuda_graph=False,
     ):
         """
         Performs voice conversion on a given audio segment.
@@ -204,18 +179,10 @@ class Pipeline:
                 feats = F.layer_norm(feats, feats.shape)
             feats = feats.view(1, -1).to(self.device)
             # extract features
-            def extract_features(source):
-                features = model(source)["last_hidden_state"]
-                if version == "v1":
-                    return model.final_proj(features[0]).unsqueeze(0)
-                return features
-
-            if self.cuda_graph_manager.allows_stage("feature", feats.device):
-                feats = self.cuda_graph_manager.run(
-                    model, f"hubert-{version}", extract_features, feats
-                )
-            else:
-                feats = extract_features(feats)
+            feats = model(feats)["last_hidden_state"]
+            feats = (
+                model.final_proj(feats[0]).unsqueeze(0) if version == "v1" else feats
+            )
             # make a copy for pitch guidance and protection
             feats0 = feats.clone() if pitch_guidance else None
             if (
@@ -250,34 +217,13 @@ class Pipeline:
             with _INFERENCE_RNG_LOCK:
                 if inference_rng is not None:
                     inference_rng.seed_next_segment()
-                if pitch is not None and pitchf is not None:
-                    audio1 = self.cuda_graph_manager.run(
-                        net_g,
-                        "generator-f0",
-                        lambda phone, lengths, coarse, continuous, speaker: net_g.infer(
-                            phone, lengths, coarse, continuous, speaker
-                        )[0],
-                        feats.float(),
-                        p_len,
-                        pitch,
-                        pitchf,
-                        sid,
-                    )[0, 0]
-                else:
-                    audio1 = self.cuda_graph_manager.run(
-                        net_g,
-                        "generator-no-f0",
-                        lambda phone, lengths, speaker: net_g.infer(
-                            phone, lengths, None, None, speaker
-                        )[0],
-                        feats.float(),
-                        p_len,
-                        sid,
-                    )[0, 0]
+                audio1 = net_g.infer(feats.float(), p_len, pitch, pitchf, sid)[0][
+                    0, 0
+                ]
             audio1 = audio1.data.cpu().float().numpy()
             # clean up
             del feats, feats0, p_len
-            if torch.cuda.is_available() and not self.cuda_graph_manager.enabled:
+            if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         return audio1
 
@@ -307,7 +253,6 @@ class Pipeline:
         version,
         protect,
         inference_rng=None,
-        use_cuda_graph=False,
     ):
         """
         The main pipeline function for performing voice conversion.
@@ -330,9 +275,6 @@ class Pipeline:
             inference_rng: Seed sequence shared by all segments in the input audio.
             hop_length: Hop length for F0 estimation methods.
         """
-        self.cuda_graph_manager.set_enabled(
-            use_cuda_graph and str(self.device).startswith("cuda")
-        )
         if file_index != "" and os.path.exists(file_index) and index_rate > 0:
             try:
                 index = faiss.read_index(file_index)
@@ -370,7 +312,6 @@ class Pipeline:
                 p_len,
                 f0_method,
                 pitch,
-                use_cuda_graph,
             )
             pitch = pitch[:p_len]
             pitchf = pitchf[:p_len]
@@ -395,7 +336,6 @@ class Pipeline:
                         version,
                         protect,
                         inference_rng,
-                        use_cuda_graph,
                     )[self.t_pad_tgt : -self.t_pad_tgt]
                 )
             else:
@@ -413,7 +353,6 @@ class Pipeline:
                         version,
                         protect,
                         inference_rng,
-                        use_cuda_graph,
                     )[self.t_pad_tgt : -self.t_pad_tgt]
                 )
             s = t
@@ -432,7 +371,6 @@ class Pipeline:
                     version,
                     protect,
                     inference_rng,
-                    use_cuda_graph,
                 )[self.t_pad_tgt : -self.t_pad_tgt]
             )
         else:
@@ -450,13 +388,12 @@ class Pipeline:
                     version,
                     protect,
                     inference_rng,
-                    use_cuda_graph,
                 )[self.t_pad_tgt : -self.t_pad_tgt]
             )
         audio_opt = np.concatenate(audio_opt)
         if pitch_guidance:
             del pitch, pitchf
         del sid
-        if torch.cuda.is_available() and not self.cuda_graph_manager.enabled:
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return audio_opt
