@@ -1527,6 +1527,50 @@ def inference_tab():
                 multiselect=True,
                 interactive=True,
             )
+        multi_index_refresh = gr.State(0)
+
+        @gr.render(inputs=[multi_model_files, multi_index_refresh])
+        def render_multi_index_selectors(model_paths, _):
+            available_indexes = sorted(get_files("index"))
+            index_dropdowns = []
+            if model_paths:
+                gr.Markdown(i18n("### Index Files for Selected Models"))
+            for model_path in model_paths or []:
+                model_name = os.path.splitext(os.path.basename(model_path))[0]
+                index_dropdowns.append(
+                    gr.Dropdown(
+                        label=f"{model_name}: {i18n('Index File')}",
+                        info=i18n(
+                            "Select the index file for this model, or leave it empty."
+                        ),
+                        choices=[""] + available_indexes,
+                        value=match_index(model_path, available_indexes),
+                        interactive=True,
+                        allow_custom_value=True,
+                        key=("multi-model-index", model_path),
+                    )
+                )
+
+            convert_button_multi.click(
+                fn=convert_audio_multi_model,
+                inputs=[
+                    multi_pitch,
+                    multi_index_rate,
+                    multi_normalization_db,
+                    multi_protect,
+                    multi_f0_method,
+                    multi_audio,
+                    multi_output_folder,
+                    multi_model_files,
+                    multi_split_audio,
+                    multi_export_format,
+                    multi_embedder_model,
+                    multi_sid,
+                    multi_seed,
+                    *index_dropdowns,
+                ],
+                outputs=[vc_output_multi_info, multi_audio_results],
+            )
         with gr.Row():
             multi_output_folder = gr.Textbox(
                 label=i18n("Output Folder"),
@@ -1654,14 +1698,10 @@ def inference_tab():
         embedder_model,
         sid,
         seed,
+        *index_paths,
     ):
         try:
             gr.Info(i18n("Converting audio with the selected models..."))
-            available_indexes = get_files("index")
-            index_paths = [
-                match_index(model_path, available_indexes)
-                for model_path in model_paths or []
-            ]
             result = run_multi_model_infer_script(
                 pitch,
                 index_rate,
@@ -1947,6 +1987,11 @@ def inference_tab():
         inputs=[],
         outputs=[multi_model_files, multi_audio],
         show_progress=False,
+    ).then(
+        fn=lambda refresh_count: refresh_count + 1,
+        inputs=[multi_index_refresh],
+        outputs=[multi_index_refresh],
+        show_progress=False,
     )
     audio.change(
         fn=output_path_fn,
@@ -2075,25 +2120,6 @@ def inference_tab():
             seed,
         ],
         outputs=[vc_output1, vc_output2],
-    )
-    convert_button_multi.click(
-        fn=convert_audio_multi_model,
-        inputs=[
-            multi_pitch,
-            multi_index_rate,
-            multi_normalization_db,
-            multi_protect,
-            multi_f0_method,
-            multi_audio,
-            multi_output_folder,
-            multi_model_files,
-            multi_split_audio,
-            multi_export_format,
-            multi_embedder_model,
-            multi_sid,
-            multi_seed,
-        ],
-        outputs=[vc_output_multi_info, multi_audio_results],
     )
     convert_button_batch.click(
         fn=enable_stop_convert_button,
