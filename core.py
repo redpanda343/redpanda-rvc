@@ -367,6 +367,114 @@ def run_multi_model_infer_script(
     return summary, audio_results
 
 
+def run_multi_model_batch_infer_script(
+    pitch: int,
+    index_rate: float,
+    normalization_db: float,
+    protect: float,
+    f0_method: str,
+    input_folder: str,
+    output_folder: str,
+    pth_paths,
+    index_paths,
+    split_audio: bool,
+    export_format: str,
+    embedder_model: str,
+    sid: int = 0,
+    seed: int = 0,
+):
+    if not input_folder or not os.path.isdir(input_folder):
+        raise ValueError("Select a valid input folder.")
+
+    if isinstance(pth_paths, str):
+        pth_paths = [pth_paths]
+    if isinstance(index_paths, str):
+        index_paths = [index_paths]
+    model_paths = [path for path in (pth_paths or []) if path]
+    if not model_paths:
+        raise ValueError("Select at least one voice model.")
+
+    audio_extensions = (
+        ".wav",
+        ".mp3",
+        ".flac",
+        ".ogg",
+        ".opus",
+        ".m4a",
+        ".mp4",
+        ".aac",
+        ".alac",
+        ".wma",
+        ".aiff",
+        ".webm",
+        ".ac3",
+    )
+    audio_count = sum(
+        1
+        for name in os.listdir(input_folder)
+        if name.lower().endswith(audio_extensions)
+        and os.path.isfile(os.path.join(input_folder, name))
+    )
+    if audio_count == 0:
+        raise ValueError("The input folder contains no supported audio files.")
+
+    index_paths = list(index_paths or [])
+    if len(index_paths) < len(model_paths):
+        index_paths.extend([""] * (len(model_paths) - len(index_paths)))
+
+    output_folder = output_folder or input_folder
+    os.makedirs(output_folder, exist_ok=True)
+    seed = resolve_inference_seed(seed)
+    infer_pipeline = import_voice_converter()
+    batch_results = []
+    failures = []
+    used_names = {}
+
+    for model_path, index_path in zip(model_paths, index_paths):
+        model_label = os.path.splitext(os.path.basename(model_path))[0]
+        folder_name = model_label[:80]
+        name_key = folder_name.lower()
+        used_names[name_key] = used_names.get(name_key, 0) + 1
+        if used_names[name_key] > 1:
+            folder_name = f"{folder_name}_{used_names[name_key]}"
+        model_output_folder = os.path.join(output_folder, folder_name)
+        os.makedirs(model_output_folder, exist_ok=True)
+
+        try:
+            infer_pipeline.convert_audio_batch(
+                audio_input_paths=input_folder,
+                audio_output_path=model_output_folder,
+                model_path=model_path,
+                index_path=index_path or "",
+                pitch=pitch,
+                index_rate=index_rate,
+                normalization_db=normalization_db,
+                protect=protect,
+                f0_method=f0_method,
+                split_audio=split_audio,
+                export_format=export_format,
+                embedder_model=embedder_model,
+                sid=int(sid),
+                seed=seed,
+            )
+            batch_results.append((model_label, model_output_folder))
+        except Exception as error:
+            failures.append(f"{os.path.basename(model_path)}: {error}")
+
+    summary = (
+        f"Processed {audio_count} audio files with "
+        f"{len(batch_results)} of {len(model_paths)} models."
+    )
+    if batch_results:
+        summary += "\n" + "\n".join(
+            f"{model_name}: {model_folder}"
+            for model_name, model_folder in batch_results
+        )
+    if failures:
+        summary += "\nFailed: " + "; ".join(failures)
+    return summary
+
+
 # Preprocess
 def run_preprocess_script(
     model_name: str,

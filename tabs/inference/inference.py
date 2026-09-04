@@ -12,6 +12,7 @@ from assets.i18n.i18n import I18nAuto
 from core import (
     run_batch_infer_script,
     run_infer_script,
+    run_multi_model_batch_infer_script,
     run_multi_model_infer_script,
 )
 from rvc.lib.utils import format_title
@@ -1684,6 +1685,178 @@ def inference_tab():
                             key=(position, audio_path),
                         )
 
+    with gr.Tab(i18n("Batch Multi-Model infer")) as batch_multi_model_tab:
+        with gr.Row():
+            batch_multi_input_folder = gr.Textbox(
+                label=i18n("Input Folder"),
+                info=i18n("Select the folder containing the audios to convert."),
+                placeholder=i18n("Enter input path"),
+                value=os.path.join(now_dir, "assets", "audios"),
+                interactive=True,
+            )
+            batch_multi_output_folder = gr.Textbox(
+                label=i18n("Output Folder"),
+                info=i18n(
+                    "Each model saves its converted audios in a separate subfolder."
+                ),
+                placeholder=i18n("Enter output path"),
+                value=os.path.join(now_dir, "assets", "audios"),
+                interactive=True,
+            )
+        with gr.Row():
+            batch_multi_model_files = gr.Dropdown(
+                label=i18n("Voice Models"),
+                info=i18n("Select the voice models to use for the batch."),
+                choices=sorted(get_files("model"), key=extract_model_and_epoch),
+                value=[],
+                multiselect=True,
+                interactive=True,
+            )
+            batch_multi_refresh_button = gr.Button(i18n("Refresh"), scale=0)
+
+        batch_multi_index_refresh = gr.State(0)
+
+        @gr.render(inputs=[batch_multi_model_files, batch_multi_index_refresh])
+        def render_batch_multi_index_selectors(model_paths, _):
+            available_indexes = sorted(get_files("index"))
+            index_dropdowns = []
+            if model_paths:
+                gr.Markdown(i18n("### Index Files for Selected Models"))
+            for model_path in model_paths or []:
+                model_name = os.path.splitext(os.path.basename(model_path))[0]
+                index_dropdowns.append(
+                    gr.Dropdown(
+                        label=f"{model_name}: {i18n('Index File')}",
+                        info=i18n(
+                            "Select the index file for this model, or leave it empty."
+                        ),
+                        choices=[""] + available_indexes,
+                        value=match_index(model_path, available_indexes),
+                        interactive=True,
+                        allow_custom_value=True,
+                        key=("batch-multi-model-index", model_path),
+                    )
+                )
+
+            convert_button_batch_multi.click(
+                fn=enable_stop_convert_button,
+                inputs=[],
+                outputs=[convert_button_batch_multi, stop_button_batch_multi],
+            ).then(
+                fn=convert_audio_batch_multi_model,
+                inputs=[
+                    batch_multi_pitch,
+                    batch_multi_index_rate,
+                    batch_multi_normalization_db,
+                    batch_multi_protect,
+                    batch_multi_f0_method,
+                    batch_multi_input_folder,
+                    batch_multi_output_folder,
+                    batch_multi_model_files,
+                    batch_multi_split_audio,
+                    batch_multi_export_format,
+                    batch_multi_embedder_model,
+                    batch_multi_sid,
+                    batch_multi_seed,
+                    *index_dropdowns,
+                ],
+                outputs=[batch_multi_output_info],
+            ).then(
+                fn=disable_stop_convert_button,
+                inputs=[],
+                outputs=[convert_button_batch_multi, stop_button_batch_multi],
+            )
+
+        with gr.Accordion(i18n("Advanced Settings"), open=False):
+            batch_multi_export_format = gr.Radio(
+                label=i18n("Export Format"),
+                info=i18n("Select the format to export the audio."),
+                choices=["WAV", "MP3", "FLAC"],
+                value="WAV",
+                interactive=True,
+            )
+            batch_multi_sid = gr.Textbox(
+                label=i18n("Speaker ID"),
+                info=i18n("Speaker ID used by every selected model."),
+                value="0",
+                max_lines=1,
+                interactive=True,
+            )
+            batch_multi_split_audio = gr.Checkbox(
+                label=i18n("Split Audio"),
+                info=i18n(
+                    "Split each audio into chunks for inference to obtain better results in some cases."
+                ),
+                value=False,
+                interactive=True,
+            )
+            batch_multi_seed = gr.Textbox(
+                label=i18n("Seed"),
+                info=i18n("Keep this at 0 if you want a random seed."),
+                value="0",
+                placeholder=i18n("Enter an integer seed"),
+                max_lines=1,
+                interactive=True,
+            )
+            batch_multi_pitch = gr.Slider(
+                minimum=-24,
+                maximum=24,
+                step=1,
+                label=i18n("Pitch"),
+                info=i18n("Set the pitch used for every audio and model."),
+                value=0,
+                interactive=True,
+            )
+            batch_multi_index_rate = gr.Slider(
+                minimum=0,
+                maximum=1,
+                label=i18n("Search Feature Ratio"),
+                info=i18n("Set the influence of each model's selected index file."),
+                value=0.75,
+                interactive=True,
+            )
+            batch_multi_normalization_db = gr.Slider(
+                minimum=-12,
+                maximum=-0.5,
+                step=0.5,
+                label=i18n("Audio Normalization"),
+                info=i18n("Applies peak normalization to each output."),
+                value=-1,
+                interactive=True,
+                elem_id="normalization-db-batch-multi-model",
+            )
+            batch_multi_protect = gr.Slider(
+                minimum=0,
+                maximum=0.5,
+                label=i18n("Protect Voiceless Consonants"),
+                info=i18n("Protect consonants and breathing sounds from artifacts."),
+                value=0.5,
+                interactive=True,
+            )
+            batch_multi_f0_method = gr.Radio(
+                label=i18n("Pitch extraction algorithm"),
+                info=i18n("Pitch extraction algorithm used by every model."),
+                choices=["pm", "rmvpe", "fcpe"],
+                value="rmvpe",
+                interactive=True,
+            )
+            batch_multi_embedder_model = gr.Radio(
+                label=i18n("Embedder Model"),
+                info=i18n("Model used for generating content features."),
+                choices=["contentvec", "spin-v2"],
+                value="contentvec",
+                interactive=True,
+            )
+
+        convert_button_batch_multi = gr.Button(i18n("Convert"))
+        stop_button_batch_multi = gr.Button(i18n("Stop convert"), visible=False)
+        stop_button_batch_multi.click(fn=stop_infer, inputs=[], outputs=[])
+        batch_multi_output_info = gr.Textbox(
+            label=i18n("Output Information"),
+            info=i18n("Model output folders will be displayed here."),
+            lines=6,
+        )
+
     def convert_audio_multi_model(
         pitch,
         index_rate,
@@ -1727,6 +1900,50 @@ def inference_tab():
             )
             gr.Warning(message)
             return message, []
+
+    def convert_audio_batch_multi_model(
+        pitch,
+        index_rate,
+        normalization_db,
+        protect,
+        f0_method,
+        input_folder,
+        output_folder,
+        model_paths,
+        split_audio,
+        export_format,
+        embedder_model,
+        sid,
+        seed,
+        *index_paths,
+    ):
+        try:
+            gr.Info(i18n("Converting the batch with the selected models..."))
+            result = run_multi_model_batch_infer_script(
+                pitch,
+                index_rate,
+                normalization_db,
+                protect,
+                f0_method,
+                input_folder,
+                output_folder,
+                model_paths,
+                index_paths,
+                split_audio,
+                export_format,
+                embedder_model,
+                sid,
+                seed,
+            )
+            gr.Info(result.splitlines()[0])
+            return result
+        except Exception:
+            traceback.print_exc()
+            message = i18n(
+                "An error occurred during multi-model batch inference. Please check the console logs for more details."
+            )
+            gr.Warning(message)
+            return message
 
     def toggle_visible(checkbox):
         return {"visible": checkbox, "__type__": "update"}
@@ -1782,6 +1999,12 @@ def inference_tab():
         show_progress=False,
     )
     multi_model_tab.select(
+        fn=lambda: gr.update(visible=False),
+        inputs=[],
+        outputs=[model_controls],
+        show_progress=False,
+    )
+    batch_multi_model_tab.select(
         fn=lambda: gr.update(visible=False),
         inputs=[],
         outputs=[model_controls],
@@ -1993,6 +2216,19 @@ def inference_tab():
         outputs=[multi_index_refresh],
         show_progress=False,
     )
+    batch_multi_refresh_button.click(
+        fn=lambda: gr.update(
+            choices=sorted(get_files("model"), key=extract_model_and_epoch)
+        ),
+        inputs=[],
+        outputs=[batch_multi_model_files],
+        show_progress=False,
+    ).then(
+        fn=lambda refresh_count: refresh_count + 1,
+        inputs=[batch_multi_index_refresh],
+        outputs=[batch_multi_index_refresh],
+        show_progress=False,
+    )
     audio.change(
         fn=output_path_fn,
         inputs=[audio],
@@ -2192,4 +2428,9 @@ def inference_tab():
         fn=disable_stop_convert_button,
         inputs=[],
         outputs=[convert_button_batch, stop_button],
+    )
+    stop_button_batch_multi.click(
+        fn=disable_stop_convert_button,
+        inputs=[],
+        outputs=[convert_button_batch_multi, stop_button_batch_multi],
     )
