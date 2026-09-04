@@ -9,7 +9,11 @@ import regex as re
 import torch
 
 from assets.i18n.i18n import I18nAuto
-from core import run_batch_infer_script, run_infer_script
+from core import (
+    run_batch_infer_script,
+    run_infer_script,
+    run_multi_model_infer_script,
+)
 from rvc.lib.utils import format_title
 from tabs.settings.sections.filter import get_filter_trigger, load_config_filter
 from tabs.settings.sections.restart import stop_infer
@@ -182,6 +186,25 @@ def change_choices(model):
             ),
             "__type__": "update",
         },
+        {"choices": models_list, "__type__": "update"},
+        {"choices": sorted(audio_paths), "__type__": "update"},
+    )
+
+
+def change_multi_choices():
+    current_audio_paths = [
+        os.path.join(root, name)
+        for root, _, files in os.walk(audio_root_relative, topdown=False)
+        for name in files
+        if name.endswith(tuple(sup_audioext))
+        and root == audio_root_relative
+        and "_output" not in name
+    ]
+    return (
+        gr.update(
+            choices=sorted(get_files("model"), key=extract_model_and_epoch)
+        ),
+        gr.update(choices=sorted(current_audio_paths)),
     )
 
 
@@ -216,6 +239,11 @@ def save_to_wav2(upload_audio):
 
     shutil.copy(file_path, target_path)
     return target_path, output_path_fn(target_path)
+
+
+def save_multi_audio(upload_audio):
+    result = save_to_wav2(upload_audio)
+    return result[0] if result else None
 
 
 def delete_outputs():
@@ -264,7 +292,7 @@ def folders_same(
     return False
 
 
-def match_index(model_file_value):
+def match_index(model_file_value, available_indexes=None):
     if not model_file_value:
         return ""
 
@@ -284,7 +312,8 @@ def match_index(model_file_value):
     external_substr = None
     external_pref = None
 
-    for idx in get_files("index"):
+    indexes = available_indexes if available_indexes is not None else get_files("index")
+    for idx in indexes:
         idx_folder = os.path.dirname(idx)
         idx_folder_n = normalize_path(idx_folder)
         idx_name = os.path.basename(idx)
@@ -415,7 +444,7 @@ def update_filter_visibility(_):
 # Inference tab
 def inference_tab():
     trigger = get_filter_trigger()
-    with gr.Column():
+    with gr.Column() as model_controls:
         with gr.Row():
             model_file = gr.Dropdown(
                 label=i18n("Voice Model"),
@@ -471,7 +500,7 @@ def inference_tab():
             )
 
     # Single inference tab
-    with gr.Tab(i18n("Single")):
+    with gr.Tab(i18n("Single")) as single_tab:
         with gr.Column():
             upload_audio = gr.Audio(
                 label=i18n("Upload Audio"), type="filepath", editable=False
@@ -990,7 +1019,7 @@ def inference_tab():
             vc_output2 = gr.Audio(label=i18n("Export Audio"))
 
     # Batch inference tab
-    with gr.Tab(i18n("Batch")):
+    with gr.Tab(i18n("Batch")) as batch_tab:
         with gr.Row():
             with gr.Column():
                 input_folder_batch = gr.Textbox(
@@ -1475,6 +1504,180 @@ def inference_tab():
                 info=i18n("The output information will be displayed here."),
             )
 
+    with gr.Tab(i18n("Multi-Model infer")) as multi_model_tab:
+        multi_upload_audio = gr.Audio(
+            label=i18n("Upload Audio"), type="filepath", editable=False
+        )
+        with gr.Row():
+            multi_audio = gr.Dropdown(
+                label=i18n("Select Audio"),
+                info=i18n("Select one audio file to convert with every model."),
+                choices=sorted(audio_paths),
+                value=audio_paths[0] if audio_paths else "",
+                interactive=True,
+                allow_custom_value=True,
+            )
+            multi_model_files = gr.Dropdown(
+                label=i18n("Voice Models"),
+                info=i18n(
+                    "Select the voice models to use. The matching index is selected automatically for each model."
+                ),
+                choices=sorted(get_files("model"), key=extract_model_and_epoch),
+                value=[],
+                multiselect=True,
+                interactive=True,
+            )
+        with gr.Row():
+            multi_output_folder = gr.Textbox(
+                label=i18n("Output Folder"),
+                info=i18n("Each model creates a separate, uniquely named audio file."),
+                value=os.path.join(now_dir, "assets", "audios"),
+                interactive=True,
+            )
+            multi_refresh_button = gr.Button(i18n("Refresh"), scale=0)
+        with gr.Accordion(i18n("Advanced Settings"), open=False):
+            multi_export_format = gr.Radio(
+                label=i18n("Export Format"),
+                info=i18n("Select the format to export the audio."),
+                choices=["WAV", "MP3", "FLAC"],
+                value="WAV",
+                interactive=True,
+            )
+            multi_sid = gr.Textbox(
+                label=i18n("Speaker ID"),
+                info=i18n("Speaker ID used by every selected model."),
+                value="0",
+                max_lines=1,
+                interactive=True,
+            )
+            multi_split_audio = gr.Checkbox(
+                label=i18n("Split Audio"),
+                info=i18n(
+                    "Split the audio into chunks for inference to obtain better results in some cases."
+                ),
+                value=False,
+                interactive=True,
+            )
+            multi_seed = gr.Textbox(
+                label=i18n("Seed"),
+                info=i18n("Keep this at 0 if you want a random seed."),
+                value="0",
+                placeholder=i18n("Enter an integer seed"),
+                max_lines=1,
+                interactive=True,
+            )
+            multi_pitch = gr.Slider(
+                minimum=-24,
+                maximum=24,
+                step=1,
+                label=i18n("Pitch"),
+                info=i18n(
+                    "Set the pitch of the audio, the higher the value, the higher the pitch."
+                ),
+                value=0,
+                interactive=True,
+            )
+            multi_index_rate = gr.Slider(
+                minimum=0,
+                maximum=1,
+                label=i18n("Search Feature Ratio"),
+                info=i18n("Set the influence of each model's matched index file."),
+                value=0.75,
+                interactive=True,
+            )
+            multi_normalization_db = gr.Slider(
+                minimum=-12,
+                maximum=-0.5,
+                step=0.5,
+                label=i18n("Audio Normalization"),
+                info=i18n("Applies peak normalization to each output."),
+                value=-1,
+                interactive=True,
+                elem_id="normalization-db-multi-model",
+            )
+            multi_protect = gr.Slider(
+                minimum=0,
+                maximum=0.5,
+                label=i18n("Protect Voiceless Consonants"),
+                info=i18n("Protect consonants and breathing sounds from artifacts."),
+                value=0.5,
+                interactive=True,
+            )
+            multi_f0_method = gr.Radio(
+                label=i18n("Pitch extraction algorithm"),
+                info=i18n("Pitch extraction algorithm used by every model."),
+                choices=["pm", "rmvpe", "fcpe"],
+                value="rmvpe",
+                interactive=True,
+            )
+            multi_embedder_model = gr.Radio(
+                label=i18n("Embedder Model"),
+                info=i18n("Model used for generating content features."),
+                choices=["contentvec", "spin-v2"],
+                value="contentvec",
+                interactive=True,
+            )
+
+        convert_button_multi = gr.Button(i18n("Convert"))
+        with gr.Row():
+            vc_output_multi_info = gr.Textbox(
+                label=i18n("Output Information"),
+                info=i18n("The output information will be displayed here."),
+            )
+            vc_output_multi_files = gr.File(
+                label=i18n("Export Audios"),
+                file_count="multiple",
+                type="filepath",
+            )
+
+    def convert_audio_multi_model(
+        pitch,
+        index_rate,
+        normalization_db,
+        protect,
+        f0_method,
+        input_path,
+        output_folder,
+        model_paths,
+        split_audio,
+        export_format,
+        embedder_model,
+        sid,
+        seed,
+    ):
+        try:
+            gr.Info(i18n("Converting audio with the selected models..."))
+            available_indexes = get_files("index")
+            index_paths = [
+                match_index(model_path, available_indexes)
+                for model_path in model_paths or []
+            ]
+            result = run_multi_model_infer_script(
+                pitch,
+                index_rate,
+                normalization_db,
+                protect,
+                f0_method,
+                input_path,
+                output_folder,
+                model_paths,
+                index_paths,
+                split_audio,
+                export_format,
+                embedder_model,
+                sid,
+                seed,
+            )
+            gr.Info(result[0])
+            return result
+        except Exception:
+            traceback.print_exc()
+            message = i18n(
+                "An error occurred during multi-model inference. Please check the console logs for more details."
+            )
+            gr.Warning(message)
+            return message, []
+
     def toggle_visible(checkbox):
         return {"visible": checkbox, "__type__": "update"}
 
@@ -1516,6 +1719,24 @@ def inference_tab():
     def delay_visible(checkbox):
         return update_visibility(checkbox, 3)
 
+    single_tab.select(
+        fn=lambda: gr.update(visible=True),
+        inputs=[],
+        outputs=[model_controls],
+        show_progress=False,
+    )
+    batch_tab.select(
+        fn=lambda: gr.update(visible=True),
+        inputs=[],
+        outputs=[model_controls],
+        show_progress=False,
+    )
+    multi_model_tab.select(
+        fn=lambda: gr.update(visible=False),
+        inputs=[],
+        outputs=[model_controls],
+        show_progress=False,
+    )
     clean_audio.change(
         fn=toggle_visible,
         inputs=[clean_audio],
@@ -1697,11 +1918,25 @@ def inference_tab():
     refresh_button.click(
         fn=change_choices,
         inputs=[model_file],
-        outputs=[model_file, index_file, audio, sid, sid_batch],
+        outputs=[
+            model_file,
+            index_file,
+            audio,
+            sid,
+            sid_batch,
+            multi_model_files,
+            multi_audio,
+        ],
     ).then(
         fn=filter_dropdowns,
         inputs=[filter_box_inf],
         outputs=[model_file, index_file],
+    )
+    multi_refresh_button.click(
+        fn=change_multi_choices,
+        inputs=[],
+        outputs=[multi_model_files, multi_audio],
+        show_progress=False,
     )
     audio.change(
         fn=output_path_fn,
@@ -1717,6 +1952,16 @@ def inference_tab():
         fn=save_to_wav,
         inputs=[upload_audio],
         outputs=[audio, output_path],
+    )
+    multi_upload_audio.upload(
+        fn=save_multi_audio,
+        inputs=[multi_upload_audio],
+        outputs=[multi_audio],
+    )
+    multi_upload_audio.stop_recording(
+        fn=save_multi_audio,
+        inputs=[multi_upload_audio],
+        outputs=[multi_audio],
     )
     clear_outputs_infer.click(
         fn=delete_outputs,
@@ -1820,6 +2065,25 @@ def inference_tab():
             seed,
         ],
         outputs=[vc_output1, vc_output2],
+    )
+    convert_button_multi.click(
+        fn=convert_audio_multi_model,
+        inputs=[
+            multi_pitch,
+            multi_index_rate,
+            multi_normalization_db,
+            multi_protect,
+            multi_f0_method,
+            multi_audio,
+            multi_output_folder,
+            multi_model_files,
+            multi_split_audio,
+            multi_export_format,
+            multi_embedder_model,
+            multi_sid,
+            multi_seed,
+        ],
+        outputs=[vc_output_multi_info, vc_output_multi_files],
     )
     convert_button_batch.click(
         fn=enable_stop_convert_button,

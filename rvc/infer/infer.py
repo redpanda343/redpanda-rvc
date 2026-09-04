@@ -316,6 +316,18 @@ class VoiceConverter:
             return audio * (OUTPUT_PEAK_CEILING / peak)
         return audio
 
+    @staticmethod
+    def prepare_audio(audio_input_path, split_audio):
+        audio = load_audio_infer(audio_input_path, 16000)
+        audio_max = np.abs(audio).max() / 0.95
+        if audio_max > 1:
+            audio /= audio_max
+        if split_audio:
+            chunks, intervals = process_audio(audio, 16000)
+        else:
+            chunks, intervals = [audio], None
+        return audio, chunks, intervals
+
     @deterministic_inference
     def convert_audio(
         self,
@@ -376,14 +388,17 @@ class VoiceConverter:
         start_time = time.time()
         print(f"Converting audio '{audio_input_path}'...")
 
-        audio = load_audio_infer(
-            audio_input_path,
-            16000,
-        )
-        audio_max = np.abs(audio).max() / 0.95
-
-        if audio_max > 1:
-            audio /= audio_max
+        prepared_audio = kwargs.pop("_prepared_audio", None)
+        prepared_chunks = kwargs.pop("_prepared_chunks", None)
+        prepared_intervals = kwargs.pop("_prepared_intervals", None)
+        if prepared_audio is None or prepared_chunks is None:
+            audio, chunks, intervals = self.prepare_audio(
+                audio_input_path, split_audio
+            )
+        else:
+            audio = prepared_audio
+            chunks = prepared_chunks
+            intervals = prepared_intervals
 
         if not self.hubert_model or embedder_model != self.last_embedder_model:
             self.load_hubert(embedder_model, embedder_model_custom)
@@ -402,11 +417,7 @@ class VoiceConverter:
             self.tgt_sr = resample_sr
 
         if split_audio:
-            chunks, intervals = process_audio(audio, 16000)
             print(f"Audio split into {len(chunks)} chunks for processing.")
-        else:
-            chunks = []
-            chunks.append(audio)
 
         inference_rng = InferenceRNG(seed) if seed is not None else None
         converted_chunks = []
@@ -640,5 +651,14 @@ class VoiceConverter:
         Sets up the voice conversion pipeline instance based on the target sampling rate and configuration.
         """
         if self.cpt is not None:
+            previous_vc = self.vc
             self.vc = VC(self.tgt_sr, self.config)
+            if previous_vc is not None:
+                for predictor_name in ("model_rmvpe", "model_fcpe"):
+                    if hasattr(previous_vc, predictor_name):
+                        setattr(
+                            self.vc,
+                            predictor_name,
+                            getattr(previous_vc, predictor_name),
+                        )
             self.n_spk = self.cpt["config"][-3]

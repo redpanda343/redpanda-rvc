@@ -285,6 +285,87 @@ def run_batch_infer_script(
     return f"Files from {input_folder} inferred successfully."
 
 
+def run_multi_model_infer_script(
+    pitch: int,
+    index_rate: float,
+    normalization_db: float,
+    protect: float,
+    f0_method: str,
+    input_path: str,
+    output_folder: str,
+    pth_paths,
+    index_paths,
+    split_audio: bool,
+    export_format: str,
+    embedder_model: str,
+    sid: int = 0,
+    seed: int = 0,
+):
+    if not input_path or not os.path.isfile(input_path):
+        raise ValueError("Select a valid input audio file.")
+
+    if isinstance(pth_paths, str):
+        pth_paths = [pth_paths]
+    if isinstance(index_paths, str):
+        index_paths = [index_paths]
+    model_paths = [path for path in (pth_paths or []) if path]
+    if not model_paths:
+        raise ValueError("Select at least one voice model.")
+
+    index_paths = list(index_paths or [])
+    if len(index_paths) < len(model_paths):
+        index_paths.extend([""] * (len(model_paths) - len(index_paths)))
+
+    output_folder = output_folder or os.path.dirname(input_path)
+    os.makedirs(output_folder, exist_ok=True)
+    seed = resolve_inference_seed(seed)
+    infer_pipeline = import_voice_converter()
+    audio, chunks, intervals = infer_pipeline.prepare_audio(input_path, split_audio)
+    input_name = os.path.splitext(os.path.basename(input_path))[0][:80]
+    output_paths = []
+    failures = []
+    used_names = {}
+
+    for model_path, index_path in zip(model_paths, index_paths):
+        model_name = os.path.splitext(os.path.basename(model_path))[0][:80]
+        output_name = f"{input_name}_{model_name}_output"
+        name_key = output_name.lower()
+        used_names[name_key] = used_names.get(name_key, 0) + 1
+        if used_names[name_key] > 1:
+            output_name = f"{output_name}_{used_names[name_key]}"
+        wav_path = os.path.join(output_folder, f"{output_name}.wav")
+        exported_path = os.path.splitext(wav_path)[0] + f".{export_format.lower()}"
+
+        try:
+            infer_pipeline.convert_audio(
+                audio_input_path=input_path,
+                audio_output_path=wav_path,
+                model_path=model_path,
+                index_path=index_path or "",
+                pitch=pitch,
+                index_rate=index_rate,
+                normalization_db=normalization_db,
+                protect=protect,
+                f0_method=f0_method,
+                split_audio=split_audio,
+                export_format=export_format,
+                embedder_model=embedder_model,
+                sid=int(sid),
+                seed=seed,
+                _prepared_audio=audio,
+                _prepared_chunks=chunks,
+                _prepared_intervals=intervals,
+            )
+            output_paths.append(exported_path)
+        except Exception as error:
+            failures.append(f"{os.path.basename(model_path)}: {error}")
+
+    summary = f"Converted {len(output_paths)} of {len(model_paths)} models."
+    if failures:
+        summary += " Failed: " + "; ".join(failures)
+    return summary, output_paths
+
+
 # Preprocess
 def run_preprocess_script(
     model_name: str,
