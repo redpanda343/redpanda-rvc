@@ -458,6 +458,15 @@ gradio-app > .gradio-container {
 """
 
 APP_JS = """
+let favicon = document.querySelector("link[rel~='icon']");
+if (!favicon) {
+    favicon = document.createElement("link");
+    favicon.rel = "icon";
+    document.head.appendChild(favicon);
+}
+favicon.type = "image/x-icon";
+favicon.href = "favicon.ico?v=red-panda-ico-1";
+
 const updateNormalizationLabels = () => {
     document.querySelectorAll("#normalization-db, #normalization-db-batch").forEach((root) => {
         const label = root.querySelector("[data-testid='min-value']");
@@ -553,7 +562,7 @@ def launch_gradio(server_name: str, server_port: int, auth=None) -> None:
 
         auth = build_launch_auth(server_name, _has_share)
     app, local_url, share_url = Applio.launch(
-        favicon_path="assets/applio_mascot.png",
+        favicon_path="assets/red_panda_favicon.ico",
         share=_has_share,
         inbrowser=False,
         server_name=server_name,
