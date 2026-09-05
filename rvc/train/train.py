@@ -6,7 +6,7 @@ import datetime
 import glob
 import hashlib
 import json
-from collections import defaultdict, deque
+from collections import defaultdict
 from random import randint, shuffle
 from time import time as ttime
 
@@ -402,17 +402,6 @@ global_step = 0
 last_loss_gen_all = 0
 training_file_path = os.path.join(experiment_dir, "training_data.json")
 
-avg_losses = {
-    "grad_d_50": deque(maxlen=50),
-    "grad_g_50": deque(maxlen=50),
-    "disc_loss_50": deque(maxlen=50),
-    "adv_loss_50": deque(maxlen=50),
-    "fm_loss_50": deque(maxlen=50),
-    "kl_loss_50": deque(maxlen=50),
-    "mel_loss_50": deque(maxlen=50),
-    "gen_loss_50": deque(maxlen=50),
-}
-
 import logging
 
 logging.getLogger("torch").setLevel(logging.ERROR)
@@ -573,7 +562,9 @@ def run(
     global global_step
 
     if rank == 0:
-        writer_eval = SummaryWriter(log_dir=os.path.join(experiment_dir, "eval"))
+        writer_eval = SummaryWriter(
+            log_dir=os.path.join(experiment_dir, "eval"), max_queue=1000
+        )
     else:
         writer_eval = None
 
@@ -1077,6 +1068,45 @@ def train_and_evaluate(
 
             global_step += 1
 
+            if rank == 0:
+                (
+                    loss_gen_all_value,
+                    loss_disc_value,
+                    loss_gen_value,
+                    loss_fm_value,
+                    loss_mel_value,
+                    loss_kl_value,
+                ) = (
+                    torch.stack(
+                        (
+                            loss_gen_all.detach(),
+                            loss_disc.detach(),
+                            loss_gen.detach(),
+                            loss_fm.detach(),
+                            loss_mel.detach(),
+                            loss_kl.detach(),
+                        )
+                    )
+                    .float()
+                    .cpu()
+                    .tolist()
+                )
+                summarize(
+                    writer=writer,
+                    global_step=global_step,
+                    scalars={
+                        "loss/g/total": loss_gen_all_value,
+                        "loss/d/adv": loss_disc_value,
+                        "learning_rate": optim_g.param_groups[0]["lr"],
+                        "grad/norm_d": grad_norm_d,
+                        "grad/norm_g": grad_norm_g,
+                        "loss/g/adv": loss_gen_value,
+                        "loss/g/fm": loss_fm_value,
+                        "loss/g/mel": loss_mel_value,
+                        "loss/g/kl": loss_kl_value,
+                    },
+                )
+
             if (
                 rank == 0
                 and save_every_steps > 0
@@ -1102,48 +1132,6 @@ def train_and_evaluate(
                         vocoder=vocoder,
                         export_dtype=inference_export_dtype,
                     )
-
-            # queue for rolling losses over 50 steps
-            avg_losses["grad_d_50"].append(grad_norm_d)
-            avg_losses["grad_g_50"].append(grad_norm_g)
-            avg_losses["disc_loss_50"].append(loss_disc.detach())
-            avg_losses["adv_loss_50"].append(loss_gen.detach())
-            avg_losses["fm_loss_50"].append(loss_fm.detach())
-            avg_losses["kl_loss_50"].append(loss_kl.detach())
-            avg_losses["mel_loss_50"].append(loss_mel.detach())
-            avg_losses["gen_loss_50"].append(loss_gen_all.detach())
-
-            if rank == 0 and global_step % 50 == 0:
-                # logging rolling averages
-                scalar_dict = {
-                    "grad_avg_50/norm_d": sum(avg_losses["grad_d_50"])
-                    / len(avg_losses["grad_d_50"]),
-                    "grad_avg_50/norm_g": sum(avg_losses["grad_g_50"])
-                    / len(avg_losses["grad_g_50"]),
-                    "loss_avg_50/d/adv": torch.mean(
-                        torch.stack(list(avg_losses["disc_loss_50"]))
-                    ),
-                    "loss_avg_50/g/adv": torch.mean(
-                        torch.stack(list(avg_losses["adv_loss_50"]))
-                    ),
-                    "loss_avg_50/g/fm": torch.mean(
-                        torch.stack(list(avg_losses["fm_loss_50"]))
-                    ),
-                    "loss_avg_50/g/kl": torch.mean(
-                        torch.stack(list(avg_losses["kl_loss_50"]))
-                    ),
-                    "loss_avg_50/g/mel": torch.mean(
-                        torch.stack(list(avg_losses["mel_loss_50"]))
-                    ),
-                    "loss_avg_50/g/total": torch.mean(
-                        torch.stack(list(avg_losses["gen_loss_50"]))
-                    ),
-                }
-                summarize(
-                    writer=writer,
-                    global_step=global_step,
-                    scalars=scalar_dict,
-                )
 
             pbar.update(1)
         # end of batch train
@@ -1182,19 +1170,7 @@ def train_and_evaluate(
             config.data.mel_fmax,
         )
 
-        lr = optim_g.param_groups[0]["lr"]
-
-        scalar_dict = {
-            "loss/g/total": loss_gen_all,
-            "loss/d/adv": loss_disc,
-            "learning_rate": lr,
-            "grad/norm_d": grad_norm_d,
-            "grad/norm_g": grad_norm_g,
-            "loss/g/adv": loss_gen,
-            "loss/g/fm": loss_fm,
-            "loss/g/mel": loss_mel,
-            "loss/g/kl": loss_kl,
-        }
+        validation_scalars = {}
 
         image_dict = {
             "slice/mel_org": plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
@@ -1243,7 +1219,7 @@ def train_and_evaluate(
                         config.data.sample_rate,
                     )
                     if timbre_scores["multi_speaker"]:
-                        scalar_dict.update(
+                        validation_scalars.update(
                             {
                                 "validation/ecapa_cosine_mean": timbre_scores["mean"],
                                 "validation/ecapa_margin_mean": timbre_scores[
@@ -1258,7 +1234,7 @@ def train_and_evaluate(
                             }
                         )
                     else:
-                        scalar_dict.update(
+                        validation_scalars.update(
                             {
                                 "validation/ecapa_cosine_mean": timbre_scores["mean"],
                                 "validation/ecapa_cosine_min": timbre_scores["min"],
@@ -1273,7 +1249,7 @@ def train_and_evaluate(
                 writer=writer,
                 global_step=global_step,
                 images=image_dict,
-                scalars=scalar_dict,
+                scalars=validation_scalars,
                 audios=audio_dict,
                 audio_sample_rate=config.data.sample_rate,
             )
@@ -1282,7 +1258,6 @@ def train_and_evaluate(
                 writer=writer,
                 global_step=global_step,
                 images=image_dict,
-                scalars=scalar_dict,
             )
 
     # Save checkpoint
@@ -1359,6 +1334,7 @@ def train_and_evaluate(
                     )
 
         if done:
+            writer.close()
             os._exit(2333333)
 
 
