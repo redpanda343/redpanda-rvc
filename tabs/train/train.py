@@ -328,6 +328,7 @@ def train_tab():
         overlap_len,
         normalization_mode,
         dataset_format,
+        truncate_silence_enabled,
     ):
         gr.Info(i18n("Preprocessing dataset..."))
         result = run_preprocess_script(
@@ -343,6 +344,7 @@ def train_tab():
             overlap_len=overlap_len,
             normalization_mode=normalization_mode,
             dataset_format=dataset_format,
+            truncate_silence_enabled=truncate_silence_enabled,
         )
         if isinstance(result, str):
             if "error" in result.lower() or "failed" in result.lower():
@@ -488,11 +490,24 @@ def train_tab():
             cut_preprocess = gr.Radio(
                 label=i18n("Audio cutting"),
                 info=i18n(
-                    "Audio file slicing method: Select 'Skip' if the files are already pre-sliced, 'Simple' to merge each speaker's clips, truncate silence below -45 dB, and create fixed-length slices, or 'Automatic' to use AI-based Voice Activity Detection with FireRedVAD."
+                    "Audio file slicing method: Select 'Skip' if the files are "
+                    "already pre-sliced, 'Simple' to merge each speaker's clips "
+                    "and create fixed-length slices, or 'Automatic' to use "
+                    "AI-based Voice Activity Detection with FireRedVAD."
                 ),
                 choices=["Skip", "Simple", "Automatic"],
                 value="Automatic",
                 interactive=True,
+            )
+            truncate_silence_enabled = gr.Checkbox(
+                label=i18n("Truncate silence"),
+                info=i18n(
+                    "For Simple slicing only. Shortens silent regions longer than "
+                    "0.5 seconds to 0.5 seconds using a -45 dB threshold."
+                ),
+                value=True,
+                interactive=True,
+                visible=False,
             )
             with gr.Row():
                 chunk_len = gr.Slider(
@@ -583,6 +598,7 @@ def train_tab():
                     overlap_len,
                     normalization_mode,
                     dataset_format,
+                    truncate_silence_enabled,
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -986,10 +1002,18 @@ def train_tab():
             def update_slider_visibility(noise_reduction):
                 return gr.update(visible=noise_reduction)
 
+            def update_truncate_silence_visibility(cut_method):
+                return gr.update(visible=cut_method == "Simple")
+
             noise_reduction.change(
                 fn=update_slider_visibility,
                 inputs=noise_reduction,
                 outputs=clean_strength,
+            )
+            cut_preprocess.change(
+                fn=update_truncate_silence_visibility,
+                inputs=cut_preprocess,
+                outputs=truncate_silence_enabled,
             )
             architecture.change(
                 fn=toggle_architecture,

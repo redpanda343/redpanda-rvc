@@ -489,6 +489,7 @@ def run_preprocess_script(
     overlap_len: float,
     normalization_mode: str = "none",
     dataset_format: str = "WAV",
+    truncate_silence_enabled: bool = True,
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -509,6 +510,7 @@ def run_preprocess_script(
                 overlap_len,
                 normalization_mode,
                 dataset_format,
+                truncate_silence_enabled,
             ],
         ),
     ]
@@ -1133,7 +1135,7 @@ def batch_infer(**kwargs):
     "--cut-preprocess",
     type=click.Choice(["Skip", "Simple", "Automatic"]),
     default="Automatic",
-    help="Dataset cutting method. Simple merges clips per speaker and truncates silence below -45 dB before slicing.",
+    help="Dataset cutting method. Simple merges clips per speaker before fixed-length slicing.",
 )
 @click.option(
     "--process-effects",
@@ -1178,6 +1180,15 @@ def batch_infer(**kwargs):
     show_default=True,
     help="Format used for processed training slices.",
 )
+@click.option(
+    "--truncate-silence/--no-truncate-silence",
+    default=True,
+    show_default=True,
+    help=(
+        "Shorten silence below -45 dB before Simple slicing. "
+        "Ignored by other cutting methods."
+    ),
+)
 def preprocess(**kwargs):
     """Preprocess a dataset for training."""
     kwargs["sample_rate"] = int(kwargs["sample_rate"])
@@ -1198,6 +1209,7 @@ def preprocess(**kwargs):
         overlap_len=kwargs["overlap_len"],
         normalization_mode=kwargs["normalization_mode"],
         dataset_format=kwargs["dataset_format"],
+        truncate_silence_enabled=kwargs["truncate_silence"],
     )
     click.echo(result)
 

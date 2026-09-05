@@ -469,6 +469,7 @@ class PreProcess:
         chunk_len: float,
         overlap_len: float,
         normalization_mode: str,
+        truncate_silence_enabled: bool = True,
     ):
         audio_parts = [load_audio_ffmpeg(path, self.sr) for path in paths]
         audio_length = sum(len(part) for part in audio_parts) / self.sr
@@ -477,7 +478,8 @@ class PreProcess:
             if len(audio_parts) == 1
             else np.concatenate(audio_parts)
         )
-        audio = truncate_silence(audio, self.sr)
+        if truncate_silence_enabled:
+            audio = truncate_silence(audio, self.sr)
         audio = self._prepare_audio(
             audio,
             process_effects,
@@ -825,6 +827,7 @@ def process_simple_audio_wrapper(args):
         chunk_len,
         overlap_len,
         normalization_mode,
+        truncate_silence_enabled,
     ) = args
     return pp.process_simple_audio(
         paths,
@@ -836,6 +839,7 @@ def process_simple_audio_wrapper(args):
         chunk_len,
         overlap_len,
         normalization_mode,
+        truncate_silence_enabled,
     )
 
 
@@ -852,6 +856,7 @@ def preprocess_training_set(
     overlap_len: float,
     normalization_mode: str,
     dataset_format: str = "wav",
+    truncate_silence_enabled: bool = True,
 ):
     if not os.path.exists(input_root):
         print(f"The dataset path does not exist: '{input_root}'.")
@@ -910,6 +915,7 @@ def preprocess_training_set(
                 chunk_len,
                 overlap_len,
                 normalization_mode,
+                truncate_silence_enabled,
             )
             for sid, speaker_files in sorted(files_by_speaker.items())
         ]
@@ -971,6 +977,7 @@ if __name__ == "__main__":
     overlap_len = float(sys.argv[10])
     normalization_mode = str(sys.argv[11])
     dataset_format = str(sys.argv[12]) if len(sys.argv) > 12 else "WAV"
+    truncate_silence_enabled = strtobool(sys.argv[13]) if len(sys.argv) > 13 else True
     preprocess_training_set(
         input_root,
         sample_rate,
@@ -984,4 +991,5 @@ if __name__ == "__main__":
         overlap_len,
         normalization_mode,
         dataset_format,
+        truncate_silence_enabled,
     )
