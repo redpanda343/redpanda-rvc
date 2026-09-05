@@ -578,7 +578,7 @@ def train_tab():
 
             with gr.Row():
                 process_effects = gr.Checkbox(
-                    label=i18n("High-Pass filter"),
+                    label=i18n("DC-offset removal"),
                     info=i18n(
                         "Removes DC-offset from the dataset. Disable this if your dataset has no DC-offset or has already been passed through a high-pass filter."
                     ),
