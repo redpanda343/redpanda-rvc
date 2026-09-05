@@ -4,8 +4,9 @@ import sys
 os.environ["USE_LIBUV"] = "0" if sys.platform == "win32" else "1"
 import datetime
 import glob
+import hashlib
 import json
-from collections import deque
+from collections import defaultdict, deque
 from random import randint, shuffle
 from time import time as ttime
 
@@ -42,6 +43,7 @@ from rvc.train.utils import (
 import rvc.lib.zluda
 from rvc.lib.algorithm import commons
 from rvc.train.process.extract_model import extract_model
+from rvc.train.timbre_validation import ECAPATimbreValidator
 
 # Parse command line arguments
 model_name = sys.argv[1]
@@ -52,6 +54,271 @@ pretrainD = sys.argv[5]
 gpus = sys.argv[6]
 batch_size = int(sys.argv[7])
 sample_rate = int(sys.argv[8])
+
+
+def _speaker_id(item):
+    try:
+        return int(item[4])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _timbre_reference_from_samples(samples, collate_fn, device):
+    info = collate_fn(samples)
+    phone, phone_lengths, pitch, pitchf, _, _, wave, wave_lengths, sid = info
+    inference_inputs = (
+        phone.to(device),
+        phone_lengths.to(device),
+        pitch.to(device),
+        pitchf.to(device),
+        sid.to(device),
+    )
+    return inference_inputs, wave, wave_lengths, sid
+
+
+def build_timbre_reference(dataset, collate_fn, device, max_samples=4):
+    candidates = []
+    for index, item in enumerate(dataset.audiopaths_and_text):
+        audio_path = item[0]
+        if "mute" in os.path.basename(audio_path).lower():
+            continue
+        candidates.append((_speaker_id(item), audio_path, index))
+    candidates.sort()
+
+    selected = []
+    selected_indices = set()
+    selected_speakers = set()
+    for speaker_id, _, index in candidates:
+        if speaker_id in selected_speakers:
+            continue
+        sample = dataset[index]
+        if sample[1].abs().mean().item() <= 1e-4:
+            continue
+        selected.append(sample)
+        selected_indices.add(index)
+        selected_speakers.add(speaker_id)
+        if len(selected) == max_samples:
+            break
+
+    if len(selected) < max_samples:
+        for _, _, index in candidates:
+            if index in selected_indices:
+                continue
+            sample = dataset[index]
+            if sample[1].abs().mean().item() <= 1e-4:
+                continue
+            selected.append(sample)
+            if len(selected) == max_samples:
+                break
+
+    if not selected:
+        raise RuntimeError("No non-silent training audio is available")
+
+    return _timbre_reference_from_samples(selected, collate_fn, device)
+
+
+def _dataset_signature(items):
+    serialized = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _validation_sort_key(seed, value):
+    return hashlib.sha256(f"{seed}:{value}".encode("utf-8")).digest()
+
+
+def build_timbre_enrollment(
+    dataset,
+    collate_fn,
+    speaker_ids,
+    seed,
+    max_per_speaker=3,
+):
+    target_speakers = sorted({int(speaker_id) for speaker_id in speaker_ids})
+    groups = defaultdict(list)
+    for index, item in enumerate(dataset.audiopaths_and_text):
+        speaker_id = _speaker_id(item)
+        if speaker_id not in target_speakers:
+            continue
+        audio_path = item[0]
+        if "mute" in os.path.basename(audio_path).lower():
+            continue
+        groups[speaker_id].append((audio_path, index))
+
+    selected = []
+    for speaker_id in target_speakers:
+        candidates = sorted(
+            groups[speaker_id],
+            key=lambda item: _validation_sort_key(
+                seed, f"enrollment:{speaker_id}:{item[0]}"
+            ),
+        )
+        speaker_samples = []
+        for _, index in candidates:
+            try:
+                sample = dataset[index]
+            except Exception:
+                continue
+            if sample[1].abs().mean().item() <= 1e-4:
+                continue
+            speaker_samples.append(sample)
+            if len(speaker_samples) == max_per_speaker:
+                break
+        if not speaker_samples:
+            raise RuntimeError(f"No enrollment audio is available for speaker {speaker_id}")
+        selected.extend(speaker_samples)
+
+    info = collate_fn(selected)
+    return info[6], info[7], info[8]
+
+
+def _select_held_out_paths(
+    dataset,
+    seed,
+    max_samples=16,
+    max_per_speaker=4,
+    min_samples_per_speaker=8,
+):
+    groups = defaultdict(list)
+    for index, item in enumerate(dataset.audiopaths_and_text):
+        audio_path = item[0]
+        if "mute" in os.path.basename(audio_path).lower():
+            continue
+        groups[_speaker_id(item)].append((audio_path, index))
+
+    speaker_order = sorted(
+        groups,
+        key=lambda speaker_id: _validation_sort_key(seed, f"speaker:{speaker_id}"),
+    )
+    candidates = {}
+    targets = {}
+    for speaker_id in speaker_order:
+        group = sorted(
+            groups[speaker_id],
+            key=lambda item: _validation_sort_key(seed, item[0]),
+        )
+        available = len(group) - min_samples_per_speaker
+        if available < 1:
+            continue
+        target = max(1, (len(group) + 19) // 20)
+        candidates[speaker_id] = group
+        targets[speaker_id] = min(target, max_per_speaker, available)
+
+    selected = []
+    cursors = defaultdict(int)
+    counts = defaultdict(int)
+    while len(selected) < max_samples:
+        progress = False
+        for speaker_id in speaker_order:
+            if speaker_id not in candidates or counts[speaker_id] >= targets[speaker_id]:
+                continue
+            group = candidates[speaker_id]
+            while cursors[speaker_id] < len(group):
+                audio_path, index = group[cursors[speaker_id]]
+                cursors[speaker_id] += 1
+                try:
+                    sample = dataset[index]
+                except Exception:
+                    continue
+                if sample[1].abs().mean().item() <= 1e-4:
+                    continue
+                selected.append(audio_path)
+                counts[speaker_id] += 1
+                progress = True
+                break
+            if len(selected) == max_samples:
+                break
+        if not progress:
+            break
+    return selected
+
+
+def prepare_held_out_timbre_reference(
+    dataset,
+    collate_fn,
+    device,
+    experiment_dir,
+    rank,
+    seed,
+    minimum_training_samples,
+):
+    manifest_path = os.path.join(experiment_dir, "held_out_validation.json")
+    signature = _dataset_signature(dataset.audiopaths_and_text)
+    manifest_box = [None]
+    if rank == 0:
+        manifest = None
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as file:
+                candidate = json.load(file)
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("version") == 2
+                and candidate.get("dataset_signature") == signature
+                and candidate.get("seed") == seed
+                and candidate.get("minimum_training_samples")
+                == minimum_training_samples
+                and isinstance(candidate.get("audio_paths"), list)
+            ):
+                manifest = candidate
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+        if manifest is None:
+            held_out_paths = _select_held_out_paths(dataset, seed)
+            allowed = max(0, len(dataset) - minimum_training_samples)
+            held_out_paths = held_out_paths[:allowed]
+            manifest = {
+                "version": 2,
+                "dataset_signature": signature,
+                "seed": seed,
+                "minimum_training_samples": minimum_training_samples,
+                "audio_paths": held_out_paths,
+            }
+            try:
+                temporary_path = f"{manifest_path}.{os.getpid()}.tmp"
+                with open(temporary_path, "w", encoding="utf-8") as file:
+                    json.dump(manifest, file, ensure_ascii=False, indent=2)
+                os.replace(temporary_path, manifest_path)
+            except OSError as error:
+                print(f"Could not persist the held-out validation split: {error}")
+        manifest_box[0] = manifest
+
+    dist.broadcast_object_list(manifest_box, src=0)
+    held_out_paths = set(manifest_box[0].get("audio_paths", []))
+    if not held_out_paths:
+        return None, False
+
+    training_items = []
+    training_lengths = []
+    validation_items = []
+    for item, length in zip(dataset.audiopaths_and_text, dataset.lengths):
+        if item[0] in held_out_paths:
+            validation_items.append(item)
+        else:
+            training_items.append(item)
+            training_lengths.append(length)
+    dataset.audiopaths_and_text = training_items
+    dataset.lengths = training_lengths
+
+    if rank != 0:
+        return None, True
+
+    samples = []
+    for item in validation_items:
+        try:
+            sample = dataset.get_audio_text_pair(item)
+        except Exception as error:
+            print(f"Could not load held-out validation sample '{item[0]}': {error}")
+            continue
+        if sample[1].abs().mean().item() > 1e-4:
+            samples.append(sample)
+
+    if not samples:
+        return None, False
+
+    print(
+        f"Held-out ECAPA validation uses {len(samples)} clips; {len(dataset)} clips remain for training."
+    )
+    return _timbre_reference_from_samples(samples, collate_fn, device), True
 
 
 def _strtobool(val):
@@ -332,6 +599,15 @@ def run(
 
     train_dataset = TextAudioLoaderMultiNSFsid(config.data)
     collate_fn = TextAudioCollateMultiNSFsid()
+    timbre_reference, timbre_is_held_out = prepare_held_out_timbre_reference(
+        train_dataset,
+        collate_fn,
+        device,
+        experiment_dir,
+        rank,
+        config.train.seed,
+        max(8, batch_size * n_gpus * 3),
+    )
     train_sampler = DistributedBucketSampler(
         train_dataset,
         batch_size,
@@ -563,6 +839,45 @@ def run(
             sid.to(device),
         )
 
+    timbre_validator = None
+    if rank == 0:
+        try:
+            timbre_model_path = os.path.join(
+                "rvc", "models", "pretraineds", "ecapa_tdnn", "pretrain.model"
+            )
+            timbre_validator = ECAPATimbreValidator(timbre_model_path)
+            if timbre_reference is None:
+                timbre_reference = build_timbre_reference(
+                    train_dataset, collate_fn, device
+                )
+                timbre_is_held_out = False
+                print("ECAPA validation is using the training-reference fallback.")
+            if timbre_is_held_out:
+                enrollment_wave, enrollment_lengths, enrollment_speakers = (
+                    build_timbre_enrollment(
+                        train_dataset,
+                        collate_fn,
+                        timbre_reference[3],
+                        config.train.seed,
+                    )
+                )
+            else:
+                enrollment_wave = timbre_reference[1]
+                enrollment_lengths = timbre_reference[2]
+                enrollment_speakers = timbre_reference[3]
+            timbre_validator.set_references(
+                enrollment_wave,
+                enrollment_lengths,
+                enrollment_speakers,
+                config.data.sample_rate,
+            )
+            print(
+                f"ECAPA timbre validation enabled with {len(timbre_reference[3])} probes and {len(enrollment_speakers)} enrollment clips."
+            )
+        except Exception as error:
+            print(f"ECAPA timbre validation disabled: {error}")
+            timbre_validator = None
+
     for epoch in range(epoch_str, total_epoch + 1):
         train_and_evaluate(
             rank,
@@ -578,6 +893,9 @@ def run(
             device,
             device_id,
             reference,
+            timbre_validator,
+            timbre_reference,
+            timbre_is_held_out,
             fn_mel_loss,
             scaler,
         )
@@ -600,6 +918,9 @@ def train_and_evaluate(
     device,
     device_id,
     reference,
+    timbre_validator,
+    timbre_reference,
+    timbre_is_held_out,
     fn_mel_loss,
     scaler,
 ):
@@ -916,14 +1237,65 @@ def train_and_evaluate(
         if epoch % save_every_epoch == 0:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-            with torch.amp.autocast(
-                device_type="cuda", enabled=use_amp, dtype=train_dtype
-            ):
-                with torch.no_grad():
-                    if hasattr(net_g, "module"):
-                        o, *_ = net_g.module.infer(*reference)
+            inference_model = net_g.module if hasattr(net_g, "module") else net_g
+            inference_model.eval()
+            rng_devices = [device_id] if device.type == "cuda" else []
+            timbre_o = None
+            try:
+                with torch.random.fork_rng(devices=rng_devices):
+                    torch.manual_seed(config.train.seed)
+                    with torch.amp.autocast(
+                        device_type="cuda", enabled=use_amp, dtype=train_dtype
+                    ):
+                        with torch.inference_mode():
+                            o, *_ = inference_model.infer(*reference)
+                            if timbre_validator is not None:
+                                try:
+                                    timbre_o, *_ = inference_model.infer(
+                                        *timbre_reference[0]
+                                    )
+                                except Exception as error:
+                                    print(f"ECAPA reference generation failed: {error}")
+            finally:
+                inference_model.train()
+
+            if timbre_validator is not None and timbre_o is not None:
+                try:
+                    speaker_ids = timbre_reference[3]
+                    generated_lengths = (
+                        timbre_reference[0][1].detach().cpu()
+                        * config.data.hop_length
+                    )
+                    timbre_scores = timbre_validator.score_batch(
+                        timbre_o.detach().cpu(),
+                        generated_lengths,
+                        speaker_ids,
+                        config.data.sample_rate,
+                    )
+                    if timbre_scores["multi_speaker"]:
+                        scalar_dict.update(
+                            {
+                                "validation/ecapa_cosine_mean": timbre_scores["mean"],
+                                "validation/ecapa_margin_mean": timbre_scores[
+                                    "margin_mean"
+                                ],
+                                "validation/ecapa_top1_accuracy_percent": timbre_scores[
+                                    "top1_accuracy_percent"
+                                ],
+                                "validation/ecapa_eer_percent": timbre_scores[
+                                    "eer_percent"
+                                ],
+                            }
+                        )
                     else:
-                        o, *_ = net_g.infer(*reference)
+                        scalar_dict.update(
+                            {
+                                "validation/ecapa_cosine_mean": timbre_scores["mean"],
+                                "validation/ecapa_cosine_min": timbre_scores["min"],
+                            }
+                        )
+                except Exception as error:
+                    print(f"ECAPA timbre validation failed: {error}")
             audio_dict = {f"gen/audio_{global_step:07d}": o[0, :, :]}
             summarize(
                 writer=writer,

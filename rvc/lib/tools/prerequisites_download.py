@@ -10,6 +10,7 @@ from tqdm import tqdm
 DOWNLOAD_TIMEOUT = (10, 120)
 DOWNLOAD_HEADERS = {"Accept-Encoding": "identity"}
 FIREREDVAD_REVISION = "7990aaccc6b7aec1e527743bd30201f2c4a03b8c"
+ECAPA_TDNN_REVISION = "4904fda6c5da208998321e3ea75e24320bab8aad"
 
 url_base = "https://huggingface.co/IAHispano/Applio/resolve/main/Resources"
 
@@ -40,6 +41,7 @@ pretraineds_refinegan_list = [
 models_list = [
     ("predictors/", ["rmvpe.pt", "fcpe.pt"]),
     ("FireRedVAD/AED/", ["model.pth.tar", "cmvn.ark"]),
+    ("ecapa_tdnn/", ["pretrain.model"]),
 ]
 embedders_list = [("embedders/contentvec/", ["pytorch_model.bin", "config.json"])]
 executables_list = [
@@ -52,12 +54,17 @@ folder_mapping_list = {
     "embedders/contentvec/": "rvc/models/embedders/contentvec/",
     "predictors/": "rvc/models/predictors/",
     "FireRedVAD/AED/": "rvc/models/pretraineds/FireRedVAD/AED/",
+    "ecapa_tdnn/": "rvc/models/pretraineds/ecapa_tdnn/",
 }
 
 remote_base_mapping = {
     "FireRedVAD/AED/": (
         "https://huggingface.co/FireRedTeam/FireRedVAD/resolve/"
         f"{FIREREDVAD_REVISION}/AED/"
+    ),
+    "ecapa_tdnn/": (
+        "https://raw.githubusercontent.com/TaoRuijie/ECAPA-TDNN/"
+        f"{ECAPA_TDNN_REVISION}/exps/"
     ),
 }
 
@@ -67,6 +74,9 @@ expected_sha256_mapping = {
     ),
     ("FireRedVAD/AED/", "model.pth.tar"): (
         "ad08a4e05b58ca328154e158d24cff57a2fe796ceabb63bb701544c3f7d4f7ad"
+    ),
+    ("ecapa_tdnn/", "pretrain.model"): (
+        "a435faa17622a6bf99db8ec6fb51aafe41eb5396d3d1b837eed7e74af8c5d64f"
     ),
 }
 
