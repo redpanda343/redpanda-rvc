@@ -330,6 +330,8 @@ def train_tab():
         dataset_format,
         truncate_silence_enabled,
         truncate_silence_threshold_db,
+        truncate_silence_to_seconds,
+        truncate_silence_minimum_seconds,
     ):
         gr.Info(i18n("Preprocessing dataset..."))
         result = run_preprocess_script(
@@ -347,6 +349,8 @@ def train_tab():
             dataset_format=dataset_format,
             truncate_silence_enabled=truncate_silence_enabled,
             truncate_silence_threshold_db=truncate_silence_threshold_db,
+            truncate_silence_to_seconds=truncate_silence_to_seconds,
+            truncate_silence_minimum_seconds=truncate_silence_minimum_seconds,
         )
         if isinstance(result, str):
             if "error" in result.lower() or "failed" in result.lower():
@@ -504,8 +508,8 @@ def train_tab():
             truncate_silence_enabled = gr.Checkbox(
                 label=i18n("Truncate silence"),
                 info=i18n(
-                    "For Simple slicing only. Shortens silent regions longer than "
-                    "0.5 seconds to 0.5 seconds."
+                    "For Simple slicing only. Shortens qualifying silent regions "
+                    "using the settings below."
                 ),
                 value=True,
                 interactive=True,
@@ -520,6 +524,32 @@ def train_tab():
                 info=i18n(
                     "For Simple slicing only. Audio below this level is treated "
                     "as silence when truncation is enabled."
+                ),
+                interactive=True,
+                visible=False,
+            )
+            truncate_silence_minimum_seconds = gr.Slider(
+                minimum=0.1,
+                maximum=5.0,
+                value=0.3,
+                step=0.1,
+                label=i18n("Minimum silence (sec)"),
+                info=i18n(
+                    "For Simple slicing only. A silent region must be at least "
+                    "this long before it can be truncated."
+                ),
+                interactive=True,
+                visible=False,
+            )
+            truncate_silence_to_seconds = gr.Slider(
+                minimum=0.1,
+                maximum=0.5,
+                value=0.3,
+                step=0.1,
+                label=i18n("Truncate to (sec)"),
+                info=i18n(
+                    "For Simple slicing only. Sets how much of each qualifying "
+                    "silent region remains after truncation."
                 ),
                 interactive=True,
                 visible=False,
@@ -615,6 +645,8 @@ def train_tab():
                     dataset_format,
                     truncate_silence_enabled,
                     truncate_silence_threshold_db,
+                    truncate_silence_to_seconds,
+                    truncate_silence_minimum_seconds,
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -1023,11 +1055,16 @@ def train_tab():
                 return (
                     gr.update(visible=simple_selected),
                     gr.update(visible=simple_selected and truncate_enabled),
+                    gr.update(visible=simple_selected and truncate_enabled),
+                    gr.update(visible=simple_selected and truncate_enabled),
                 )
 
-            def update_truncate_threshold_visibility(truncate_enabled, cut_method):
-                return gr.update(
-                    visible=truncate_enabled and cut_method == "Simple"
+            def update_truncate_controls_visibility(truncate_enabled, cut_method):
+                visible = truncate_enabled and cut_method == "Simple"
+                return (
+                    gr.update(visible=visible),
+                    gr.update(visible=visible),
+                    gr.update(visible=visible),
                 )
 
             noise_reduction.change(
@@ -1041,12 +1078,18 @@ def train_tab():
                 outputs=[
                     truncate_silence_enabled,
                     truncate_silence_threshold_db,
+                    truncate_silence_to_seconds,
+                    truncate_silence_minimum_seconds,
                 ],
             )
             truncate_silence_enabled.change(
-                fn=update_truncate_threshold_visibility,
+                fn=update_truncate_controls_visibility,
                 inputs=[truncate_silence_enabled, cut_preprocess],
-                outputs=truncate_silence_threshold_db,
+                outputs=[
+                    truncate_silence_threshold_db,
+                    truncate_silence_to_seconds,
+                    truncate_silence_minimum_seconds,
+                ],
             )
             architecture.change(
                 fn=toggle_architecture,

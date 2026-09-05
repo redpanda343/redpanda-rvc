@@ -491,6 +491,8 @@ def run_preprocess_script(
     dataset_format: str = "WAV",
     truncate_silence_enabled: bool = True,
     truncate_silence_threshold_db: float = -45.0,
+    truncate_silence_to_seconds: float = 0.3,
+    truncate_silence_minimum_seconds: float = 0.3,
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -513,6 +515,8 @@ def run_preprocess_script(
                 dataset_format,
                 truncate_silence_enabled,
                 truncate_silence_threshold_db,
+                truncate_silence_to_seconds,
+                truncate_silence_minimum_seconds,
             ],
         ),
     ]
@@ -1198,6 +1202,20 @@ def batch_infer(**kwargs):
     show_default=True,
     help="Silence threshold used by Simple slicing when truncation is enabled.",
 )
+@click.option(
+    "--truncate-silence-to-seconds",
+    type=click.FloatRange(0.1, 0.5),
+    default=0.3,
+    show_default=True,
+    help="Length retained from qualifying silence during Simple slicing.",
+)
+@click.option(
+    "--truncate-silence-minimum-seconds",
+    type=click.FloatRange(0.1, 5.0),
+    default=0.3,
+    show_default=True,
+    help="Minimum silence duration detected during Simple slicing.",
+)
 def preprocess(**kwargs):
     """Preprocess a dataset for training."""
     kwargs["sample_rate"] = int(kwargs["sample_rate"])
@@ -1220,6 +1238,10 @@ def preprocess(**kwargs):
         dataset_format=kwargs["dataset_format"],
         truncate_silence_enabled=kwargs["truncate_silence"],
         truncate_silence_threshold_db=kwargs["truncate_silence_threshold_db"],
+        truncate_silence_to_seconds=kwargs["truncate_silence_to_seconds"],
+        truncate_silence_minimum_seconds=kwargs[
+            "truncate_silence_minimum_seconds"
+        ],
     )
     click.echo(result)
 

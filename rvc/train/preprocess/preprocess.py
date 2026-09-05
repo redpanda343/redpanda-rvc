@@ -44,8 +44,8 @@ AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
 SUPPORTED_DATASET_FORMATS = {"wav", "flac"}
 SIMPLE_SILENCE_THRESHOLD_DB = -45.0
-SIMPLE_MIN_SILENCE_SECONDS = 0.5
-SIMPLE_TRUNCATE_TO_SECONDS = 0.5
+SIMPLE_MIN_SILENCE_SECONDS = 0.3
+SIMPLE_TRUNCATE_TO_SECONDS = 0.3
 SIMPLE_BLEND_FRAMES = 100
 
 
@@ -471,6 +471,8 @@ class PreProcess:
         normalization_mode: str,
         truncate_silence_enabled: bool = True,
         truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
+        truncate_silence_to_seconds: float = SIMPLE_TRUNCATE_TO_SECONDS,
+        truncate_silence_minimum_seconds: float = SIMPLE_MIN_SILENCE_SECONDS,
     ):
         audio_parts = [load_audio_ffmpeg(path, self.sr) for path in paths]
         audio_length = sum(len(part) for part in audio_parts) / self.sr
@@ -484,6 +486,8 @@ class PreProcess:
                 audio,
                 self.sr,
                 threshold_db=truncate_silence_threshold_db,
+                minimum_silence=truncate_silence_minimum_seconds,
+                truncate_to=truncate_silence_to_seconds,
             )
         audio = self._prepare_audio(
             audio,
@@ -834,6 +838,8 @@ def process_simple_audio_wrapper(args):
         normalization_mode,
         truncate_silence_enabled,
         truncate_silence_threshold_db,
+        truncate_silence_to_seconds,
+        truncate_silence_minimum_seconds,
     ) = args
     return pp.process_simple_audio(
         paths,
@@ -847,6 +853,8 @@ def process_simple_audio_wrapper(args):
         normalization_mode,
         truncate_silence_enabled,
         truncate_silence_threshold_db,
+        truncate_silence_to_seconds,
+        truncate_silence_minimum_seconds,
     )
 
 
@@ -865,6 +873,8 @@ def preprocess_training_set(
     dataset_format: str = "wav",
     truncate_silence_enabled: bool = True,
     truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
+    truncate_silence_to_seconds: float = SIMPLE_TRUNCATE_TO_SECONDS,
+    truncate_silence_minimum_seconds: float = SIMPLE_MIN_SILENCE_SECONDS,
 ):
     if not os.path.exists(input_root):
         print(f"The dataset path does not exist: '{input_root}'.")
@@ -925,6 +935,8 @@ def preprocess_training_set(
                 normalization_mode,
                 truncate_silence_enabled,
                 truncate_silence_threshold_db,
+                truncate_silence_to_seconds,
+                truncate_silence_minimum_seconds,
             )
             for sid, speaker_files in sorted(files_by_speaker.items())
         ]
@@ -990,6 +1002,12 @@ if __name__ == "__main__":
     truncate_silence_threshold_db = (
         float(sys.argv[14]) if len(sys.argv) > 14 else SIMPLE_SILENCE_THRESHOLD_DB
     )
+    truncate_silence_to_seconds = (
+        float(sys.argv[15]) if len(sys.argv) > 15 else SIMPLE_TRUNCATE_TO_SECONDS
+    )
+    truncate_silence_minimum_seconds = (
+        float(sys.argv[16]) if len(sys.argv) > 16 else SIMPLE_MIN_SILENCE_SECONDS
+    )
     preprocess_training_set(
         input_root,
         sample_rate,
@@ -1005,4 +1023,6 @@ if __name__ == "__main__":
         dataset_format,
         truncate_silence_enabled,
         truncate_silence_threshold_db,
+        truncate_silence_to_seconds,
+        truncate_silence_minimum_seconds,
     )
