@@ -337,7 +337,6 @@ randomized = True
 d_lr_coeff = 1.0
 g_lr_coeff = 1.0
 d_step_per_g_step = 1
-grad_norm_log_interval = 50
 scalar_log_buffer_size = 50
 multiscale_mel_loss = False
 bf16_adamw = False
@@ -1101,9 +1100,7 @@ def train_and_evaluate(
                 sid,
             ) = info
 
-            log_grad_norms = (
-                rank == 0 and (global_step + 1) % grad_norm_log_interval == 0
-            )
+            log_grad_norms = rank == 0
 
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
@@ -1231,14 +1228,10 @@ def train_and_evaluate(
             global_step += 1
 
             if rank == 0:
-                gradient_norms = (
-                    {
-                        "grad/norm_d": grad_norm_d,
-                        "grad/norm_g": grad_norm_g,
-                    }
-                    if log_grad_norms
-                    else {}
-                )
+                gradient_norms = {
+                    "grad/norm_d": grad_norm_d,
+                    "grad/norm_g": grad_norm_g,
+                }
                 scalar_buffer.append(
                     (
                         global_step,
