@@ -488,7 +488,7 @@ def train_tab():
             cut_preprocess = gr.Radio(
                 label=i18n("Audio cutting"),
                 info=i18n(
-                    "Audio file slicing method: Select 'Skip' if the files are already pre-sliced, 'Simple' if excessive silence has already been removed from the files, or ‘Automatic’ to use ai-based Voice Activity Detection audio slicing with FireRedVAD."
+                    "Audio file slicing method: Select 'Skip' if the files are already pre-sliced, 'Simple' to merge each speaker's clips, truncate silence below -45 dB, and create fixed-length slices, or 'Automatic' to use AI-based Voice Activity Detection with FireRedVAD."
                 ),
                 choices=["Skip", "Simple", "Automatic"],
                 value="Automatic",

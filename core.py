@@ -1133,7 +1133,7 @@ def batch_infer(**kwargs):
     "--cut-preprocess",
     type=click.Choice(["Skip", "Simple", "Automatic"]),
     default="Automatic",
-    help="Dataset cutting method.",
+    help="Dataset cutting method. Simple merges clips per speaker and truncates silence below -45 dB before slicing.",
 )
 @click.option(
     "--process-effects",

@@ -43,6 +43,10 @@ AUTOMATIC_VAD_CONTEXT_SECONDS = 2.0
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
 SUPPORTED_DATASET_FORMATS = {"wav", "flac"}
+SIMPLE_SILENCE_THRESHOLD_DB = -45.0
+SIMPLE_MIN_SILENCE_SECONDS = 0.5
+SIMPLE_TRUNCATE_TO_SECONDS = 0.5
+SIMPLE_BLEND_FRAMES = 100
 
 
 def normalize_dataset_format(dataset_format: str) -> str:
@@ -104,6 +108,27 @@ def clear_flac_preprocess_artifacts(exp_dir: str):
         os.remove(filelist_path)
 
 
+def clear_simple_preprocess_artifacts(exp_dir: str):
+    patterns_by_directory = {
+        "sliced_audios": (".wav", ".flac", ".spec.pt"),
+        "sliced_audios_16k": (".wav", ".flac"),
+        "f0": (".wav.npy", ".flac.npy"),
+        "f0_voiced": (".wav.npy", ".flac.npy"),
+        "extracted": (".wav.npy", ".flac.npy"),
+    }
+    for directory_name, suffixes in patterns_by_directory.items():
+        directory = os.path.join(exp_dir, directory_name)
+        if not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if filename.lower().endswith(suffixes):
+                os.remove(os.path.join(directory, filename))
+
+    filelist_path = os.path.join(exp_dir, "filelist.txt")
+    if os.path.isfile(filelist_path):
+        os.remove(filelist_path)
+
+
 def _ffmpeg_path():
     bundled_ffmpeg = os.path.join(now_directory, "ffmpeg.exe")
     if os.name == "nt" and os.path.isfile(bundled_ffmpeg):
@@ -148,6 +173,73 @@ def load_audio_ffmpeg(file: str, sample_rate: int) -> np.ndarray:
         check=True,
     )
     return np.frombuffer(result.stdout, dtype=np.float32).flatten()
+
+
+def truncate_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
+    minimum_silence: float = SIMPLE_MIN_SILENCE_SECONDS,
+    truncate_to: float = SIMPLE_TRUNCATE_TO_SECONDS,
+    blend_frames: int = SIMPLE_BLEND_FRAMES,
+) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.size == 0:
+        return audio
+
+    threshold = 10.0 ** (threshold_db / 20.0)
+    silent = np.abs(audio) < threshold
+    boundaries = np.flatnonzero(
+        np.diff(np.pad(silent.astype(np.int8), (1, 1)))
+    )
+    if boundaries.size == 0:
+        return audio
+
+    minimum_frames = max(1, int(round(minimum_silence * sample_rate)))
+    truncate_frames = max(0, int(round(truncate_to * sample_rate)))
+    cuts = []
+    for start, end in boundaries.reshape(-1, 2):
+        silence_frames = int(end - start)
+        if silence_frames < minimum_frames:
+            continue
+
+        output_frames = min(truncate_frames, silence_frames)
+        cut_frames = silence_frames - output_frames
+        if cut_frames <= 0:
+            continue
+
+        cut_start = int(start + output_frames // 2)
+        cut_end = cut_start + cut_frames
+        cuts.append((cut_start, cut_end))
+
+    if not cuts:
+        return audio
+
+    parts = []
+    cursor = 0
+    for cut_start, cut_end in cuts:
+        splice_frames = min(
+            blend_frames,
+            cut_start * 2,
+            (len(audio) - cut_end) * 2,
+        )
+        if splice_frames > 0:
+            half_blend = splice_frames // 2
+            blend_start = cut_start - half_blend
+            right_start = cut_end - half_blend
+            left = audio[blend_start : blend_start + splice_frames]
+            right = audio[right_start : right_start + splice_frames]
+            weights = np.arange(splice_frames, dtype=np.float32) / splice_frames
+            blended = left * (1.0 - weights) + right * weights
+            parts.append(audio[cursor:blend_start])
+            parts.append(blended)
+            cursor = right_start + splice_frames
+        else:
+            parts.append(audio[cursor:cut_start])
+            cursor = cut_end
+
+    parts.append(audio[cursor:])
+    return np.concatenate(parts)
 
 
 def load_audio_ffmpeg_segment(
@@ -365,6 +457,47 @@ class PreProcess:
                     self.dataset_format,
                 )
             i += chunk_length - overlap_length
+
+    def process_simple_audio(
+        self,
+        paths: list[str],
+        idx0: int,
+        sid: int,
+        process_effects: bool,
+        noise_reduction: bool,
+        reduction_strength: float,
+        chunk_len: float,
+        overlap_len: float,
+        normalization_mode: str,
+    ):
+        audio_parts = [load_audio_ffmpeg(path, self.sr) for path in paths]
+        audio_length = sum(len(part) for part in audio_parts) / self.sr
+        audio = (
+            audio_parts[0]
+            if len(audio_parts) == 1
+            else np.concatenate(audio_parts)
+        )
+        audio = truncate_silence(audio, self.sr)
+        audio = self._prepare_audio(
+            audio,
+            process_effects,
+            noise_reduction,
+            reduction_strength,
+            normalization_mode,
+        )
+        normalization_gain = 1.0
+        if normalization_mode == "post" and audio is not None:
+            normalization_gain = self._detect_post_normalization_gain(audio)
+        self.simple_cut(
+            audio,
+            sid,
+            idx0,
+            chunk_len,
+            overlap_len,
+            normalization_mode,
+            normalization_gain,
+        )
+        return audio_length
 
     def _prepare_audio(
         self,
@@ -680,6 +813,32 @@ def process_audio_wrapper(args):
     )
 
 
+def process_simple_audio_wrapper(args):
+    (
+        pp,
+        paths,
+        idx0,
+        sid,
+        process_effects,
+        noise_reduction,
+        reduction_strength,
+        chunk_len,
+        overlap_len,
+        normalization_mode,
+    ) = args
+    return pp.process_simple_audio(
+        paths,
+        idx0,
+        sid,
+        process_effects,
+        noise_reduction,
+        reduction_strength,
+        chunk_len,
+        overlap_len,
+        normalization_mode,
+    )
+
+
 def preprocess_training_set(
     input_root: str,
     sr: int,
@@ -708,10 +867,11 @@ def preprocess_training_set(
     files = []
     idx = 0
 
-    for root, _, filenames in os.walk(input_root):
+    for root, directories, filenames in os.walk(input_root):
+        directories.sort()
         try:
             sid = 0 if root == input_root else int(os.path.basename(root))
-            for f in filenames:
+            for f in sorted(filenames):
                 if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
                     files.append((os.path.join(root, f), idx, sid))
                     idx += 1
@@ -727,31 +887,56 @@ def preprocess_training_set(
         )
         sys.exit(1)
 
-    if dataset_format == "flac":
+    if cut_preprocess == "Simple":
+        clear_simple_preprocess_artifacts(exp_dir)
+    elif dataset_format == "flac":
         clear_flac_preprocess_artifacts(exp_dir)
     pp = PreProcess(sr, exp_dir, dataset_format)
 
     audio_length = []
-    with tqdm(total=len(files)) as pbar:
+    if cut_preprocess == "Simple":
+        files_by_speaker = {}
+        for file_path, idx0, sid in files:
+            files_by_speaker.setdefault(sid, []).append((file_path, idx0))
+        work_items = [
+            (
+                pp,
+                [file_path for file_path, _ in speaker_files],
+                speaker_files[0][1],
+                sid,
+                process_effects,
+                noise_reduction,
+                reduction_strength,
+                chunk_len,
+                overlap_len,
+                normalization_mode,
+            )
+            for sid, speaker_files in sorted(files_by_speaker.items())
+        ]
+        worker = process_simple_audio_wrapper
+    else:
+        work_items = [
+            (
+                pp,
+                file,
+                cut_preprocess,
+                process_effects,
+                noise_reduction,
+                reduction_strength,
+                chunk_len,
+                overlap_len,
+                normalization_mode,
+            )
+            for file in files
+        ]
+        worker = process_audio_wrapper
+
+    with tqdm(total=len(work_items)) as pbar:
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=num_processes
         ) as executor:
             futures = [
-                executor.submit(
-                    process_audio_wrapper,
-                    (
-                        pp,
-                        file,
-                        cut_preprocess,
-                        process_effects,
-                        noise_reduction,
-                        reduction_strength,
-                        chunk_len,
-                        overlap_len,
-                        normalization_mode,
-                    ),
-                )
-                for file in files
+                executor.submit(worker, work_item) for work_item in work_items
             ]
             for future in concurrent.futures.as_completed(futures):
                 audio_length.append(future.result())
