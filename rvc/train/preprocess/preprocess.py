@@ -114,7 +114,7 @@ def clear_simple_preprocess_artifacts(exp_dir: str):
         "sliced_audios_16k": (".wav", ".flac"),
         "f0": (".wav.npy", ".flac.npy"),
         "f0_voiced": (".wav.npy", ".flac.npy"),
-        "extracted": (".wav.npy", ".flac.npy"),
+        "extracted": (".npy",),
     }
     for directory_name, suffixes in patterns_by_directory.items():
         directory = os.path.join(exp_dir, directory_name)
