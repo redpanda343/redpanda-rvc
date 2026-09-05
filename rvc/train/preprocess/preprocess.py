@@ -470,6 +470,7 @@ class PreProcess:
         overlap_len: float,
         normalization_mode: str,
         truncate_silence_enabled: bool = True,
+        truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
     ):
         audio_parts = [load_audio_ffmpeg(path, self.sr) for path in paths]
         audio_length = sum(len(part) for part in audio_parts) / self.sr
@@ -479,7 +480,11 @@ class PreProcess:
             else np.concatenate(audio_parts)
         )
         if truncate_silence_enabled:
-            audio = truncate_silence(audio, self.sr)
+            audio = truncate_silence(
+                audio,
+                self.sr,
+                threshold_db=truncate_silence_threshold_db,
+            )
         audio = self._prepare_audio(
             audio,
             process_effects,
@@ -828,6 +833,7 @@ def process_simple_audio_wrapper(args):
         overlap_len,
         normalization_mode,
         truncate_silence_enabled,
+        truncate_silence_threshold_db,
     ) = args
     return pp.process_simple_audio(
         paths,
@@ -840,6 +846,7 @@ def process_simple_audio_wrapper(args):
         overlap_len,
         normalization_mode,
         truncate_silence_enabled,
+        truncate_silence_threshold_db,
     )
 
 
@@ -857,6 +864,7 @@ def preprocess_training_set(
     normalization_mode: str,
     dataset_format: str = "wav",
     truncate_silence_enabled: bool = True,
+    truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
 ):
     if not os.path.exists(input_root):
         print(f"The dataset path does not exist: '{input_root}'.")
@@ -916,6 +924,7 @@ def preprocess_training_set(
                 overlap_len,
                 normalization_mode,
                 truncate_silence_enabled,
+                truncate_silence_threshold_db,
             )
             for sid, speaker_files in sorted(files_by_speaker.items())
         ]
@@ -978,6 +987,9 @@ if __name__ == "__main__":
     normalization_mode = str(sys.argv[11])
     dataset_format = str(sys.argv[12]) if len(sys.argv) > 12 else "WAV"
     truncate_silence_enabled = strtobool(sys.argv[13]) if len(sys.argv) > 13 else True
+    truncate_silence_threshold_db = (
+        float(sys.argv[14]) if len(sys.argv) > 14 else SIMPLE_SILENCE_THRESHOLD_DB
+    )
     preprocess_training_set(
         input_root,
         sample_rate,
@@ -992,4 +1004,5 @@ if __name__ == "__main__":
         normalization_mode,
         dataset_format,
         truncate_silence_enabled,
+        truncate_silence_threshold_db,
     )

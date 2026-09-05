@@ -490,6 +490,7 @@ def run_preprocess_script(
     normalization_mode: str = "none",
     dataset_format: str = "WAV",
     truncate_silence_enabled: bool = True,
+    truncate_silence_threshold_db: float = -45.0,
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -511,6 +512,7 @@ def run_preprocess_script(
                 normalization_mode,
                 dataset_format,
                 truncate_silence_enabled,
+                truncate_silence_threshold_db,
             ],
         ),
     ]
@@ -1189,6 +1191,13 @@ def batch_infer(**kwargs):
         "Ignored by other cutting methods."
     ),
 )
+@click.option(
+    "--truncate-silence-threshold-db",
+    type=click.FloatRange(-80, -20),
+    default=-45.0,
+    show_default=True,
+    help="Silence threshold used by Simple slicing when truncation is enabled.",
+)
 def preprocess(**kwargs):
     """Preprocess a dataset for training."""
     kwargs["sample_rate"] = int(kwargs["sample_rate"])
@@ -1210,6 +1219,7 @@ def preprocess(**kwargs):
         normalization_mode=kwargs["normalization_mode"],
         dataset_format=kwargs["dataset_format"],
         truncate_silence_enabled=kwargs["truncate_silence"],
+        truncate_silence_threshold_db=kwargs["truncate_silence_threshold_db"],
     )
     click.echo(result)
 

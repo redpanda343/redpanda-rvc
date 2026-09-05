@@ -329,6 +329,7 @@ def train_tab():
         normalization_mode,
         dataset_format,
         truncate_silence_enabled,
+        truncate_silence_threshold_db,
     ):
         gr.Info(i18n("Preprocessing dataset..."))
         result = run_preprocess_script(
@@ -345,6 +346,7 @@ def train_tab():
             normalization_mode=normalization_mode,
             dataset_format=dataset_format,
             truncate_silence_enabled=truncate_silence_enabled,
+            truncate_silence_threshold_db=truncate_silence_threshold_db,
         )
         if isinstance(result, str):
             if "error" in result.lower() or "failed" in result.lower():
@@ -503,9 +505,22 @@ def train_tab():
                 label=i18n("Truncate silence"),
                 info=i18n(
                     "For Simple slicing only. Shortens silent regions longer than "
-                    "0.5 seconds to 0.5 seconds using a -45 dB threshold."
+                    "0.5 seconds to 0.5 seconds."
                 ),
                 value=True,
+                interactive=True,
+                visible=False,
+            )
+            truncate_silence_threshold_db = gr.Slider(
+                minimum=-80,
+                maximum=-20,
+                value=-45,
+                step=1,
+                label=i18n("Silence threshold (dB)"),
+                info=i18n(
+                    "For Simple slicing only. Audio below this level is treated "
+                    "as silence when truncation is enabled."
+                ),
                 interactive=True,
                 visible=False,
             )
@@ -599,6 +614,7 @@ def train_tab():
                     normalization_mode,
                     dataset_format,
                     truncate_silence_enabled,
+                    truncate_silence_threshold_db,
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -1002,8 +1018,17 @@ def train_tab():
             def update_slider_visibility(noise_reduction):
                 return gr.update(visible=noise_reduction)
 
-            def update_truncate_silence_visibility(cut_method):
-                return gr.update(visible=cut_method == "Simple")
+            def update_truncate_silence_visibility(cut_method, truncate_enabled):
+                simple_selected = cut_method == "Simple"
+                return (
+                    gr.update(visible=simple_selected),
+                    gr.update(visible=simple_selected and truncate_enabled),
+                )
+
+            def update_truncate_threshold_visibility(truncate_enabled, cut_method):
+                return gr.update(
+                    visible=truncate_enabled and cut_method == "Simple"
+                )
 
             noise_reduction.change(
                 fn=update_slider_visibility,
@@ -1012,8 +1037,16 @@ def train_tab():
             )
             cut_preprocess.change(
                 fn=update_truncate_silence_visibility,
-                inputs=cut_preprocess,
-                outputs=truncate_silence_enabled,
+                inputs=[cut_preprocess, truncate_silence_enabled],
+                outputs=[
+                    truncate_silence_enabled,
+                    truncate_silence_threshold_db,
+                ],
+            )
+            truncate_silence_enabled.change(
+                fn=update_truncate_threshold_visibility,
+                inputs=[truncate_silence_enabled, cut_preprocess],
+                outputs=truncate_silence_threshold_db,
             )
             architecture.change(
                 fn=toggle_architecture,
