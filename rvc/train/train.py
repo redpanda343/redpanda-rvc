@@ -909,9 +909,8 @@ def train_and_evaluate(
 
     net_g.train()
     net_d.train()
-    freeze_discriminator_for_generator = device.type == "cuda" and not isinstance(
-        net_d, DDP
-    )
+    freeze_discriminator_for_generator = device.type == "cuda"
+    generator_discriminator = net_d.module if isinstance(net_d, DDP) else net_d
 
     use_amp = device.type == "cuda" and (
         train_dtype == torch.bfloat16 or train_dtype == torch.float16
@@ -989,13 +988,13 @@ def train_and_evaluate(
 
             if freeze_discriminator_for_generator:
                 optim_d.zero_grad(set_to_none=True)
-                net_d.requires_grad_(False)
+                generator_discriminator.requires_grad_(False)
 
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
             ):
                 # Generator backward and update
-                _, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat)
+                _, y_d_hat_g, fmap_r, fmap_g = generator_discriminator(wave, y_hat)
 
             if multiscale_mel_loss:
                 loss_mel = fn_mel_loss(wave, y_hat) * config.train.c_mel / 3.0
@@ -1064,7 +1063,7 @@ def train_and_evaluate(
                 optim_g.step()
 
             if freeze_discriminator_for_generator:
-                net_d.requires_grad_(True)
+                generator_discriminator.requires_grad_(True)
 
             global_step += 1
 
