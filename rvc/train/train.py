@@ -7,6 +7,7 @@ import glob
 import hashlib
 import json
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from random import randint, shuffle
 from time import time as ttime
 
@@ -336,6 +337,8 @@ randomized = True
 d_lr_coeff = 1.0
 g_lr_coeff = 1.0
 d_step_per_g_step = 1
+grad_norm_log_interval = 50
+scalar_log_buffer_size = 50
 multiscale_mel_loss = False
 bf16_adamw = False
 disc_version = "v2"
@@ -405,6 +408,141 @@ training_file_path = os.path.join(experiment_dir, "training_data.json")
 import logging
 
 logging.getLogger("torch").setLevel(logging.ERROR)
+
+
+def flush_scalar_buffer(writer, scalar_buffer):
+    if not scalar_buffer:
+        return
+
+    scalar_rows = torch.stack([entry[1] for entry in scalar_buffer]).cpu().tolist()
+    for (step, _, learning_rate, gradient_norms), scalar_row in zip(
+        scalar_buffer, scalar_rows
+    ):
+        scalar_values = {
+            "loss/g/total": scalar_row[0],
+            "loss/d/adv": scalar_row[1],
+            "learning_rate": learning_rate,
+            "loss/g/adv": scalar_row[2],
+            "loss/g/fm": scalar_row[3],
+            "loss/g/mel": scalar_row[4],
+            "loss/g/kl": scalar_row[5],
+        }
+        scalar_values.update(gradient_norms)
+        summarize(writer=writer, global_step=step, scalars=scalar_values)
+    scalar_buffer.clear()
+
+
+class AsyncInferenceExporter:
+    def __init__(self, device):
+        self.device = device
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="inference-export"
+        )
+        self.export_future = None
+        self.staging_future = None
+        self.copy_stream = (
+            torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        )
+
+    @staticmethod
+    def _export_staged(snapshot, copy_event, staging_future, export_args):
+        if copy_event is not None:
+            try:
+                copy_event.synchronize()
+            except Exception as error:
+                staging_future.set_exception(error)
+                raise
+            staging_future.set_result(None)
+        return extract_model(ckpt=snapshot, **export_args)
+
+    def _stage_cuda(self, state_dict, export_dtype):
+        snapshot = {}
+        current_stream = torch.cuda.current_stream(self.device)
+        try:
+            with torch.cuda.stream(self.copy_stream):
+                self.copy_stream.wait_stream(current_stream)
+                for key, value in state_dict.items():
+                    if "enc_q" in key:
+                        continue
+                    value = value.detach()
+                    dtype = export_dtype if value.is_floating_point() else value.dtype
+                    staged = torch.empty_like(
+                        value, device="cpu", dtype=dtype, pin_memory=True
+                    )
+                    staged.copy_(value, non_blocking=True)
+                    snapshot[key] = staged
+                copy_event = torch.cuda.Event()
+                copy_event.record(self.copy_stream)
+        except Exception:
+            self.copy_stream.synchronize()
+            raise
+        return snapshot, copy_event
+
+    @staticmethod
+    def _stage_synchronous(state_dict, export_dtype):
+        return {
+            key: value.detach().to(
+                device="cpu",
+                dtype=export_dtype if value.is_floating_point() else value.dtype,
+                copy=True,
+            )
+            for key, value in state_dict.items()
+            if "enc_q" not in key
+        }
+
+    def submit(self, model, export_dtype, **export_args):
+        self.wait_for_completion()
+        state_dict = model.state_dict()
+        if self.device.type == "cuda":
+            snapshot, copy_event = self._stage_cuda(state_dict, export_dtype)
+            staging_future = Future()
+        else:
+            snapshot = self._stage_synchronous(state_dict, export_dtype)
+            copy_event = None
+            staging_future = Future()
+            staging_future.set_result(None)
+        self.staging_future = staging_future
+        try:
+            self.export_future = self.executor.submit(
+                self._export_staged,
+                snapshot,
+                copy_event,
+                staging_future,
+                export_args,
+            )
+        except Exception:
+            if copy_event is not None:
+                copy_event.synchronize()
+            self.staging_future = None
+            raise
+
+    def wait_for_staging(self):
+        if self.staging_future is not None:
+            self.staging_future.result()
+        self.raise_if_failed()
+
+    def raise_if_failed(self):
+        if self.export_future is not None and self.export_future.done():
+            self.wait_for_completion()
+
+    def wait_for_completion(self):
+        export_future = self.export_future
+        if export_future is None:
+            return
+        try:
+            export_future.result()
+        finally:
+            self.export_future = None
+            self.staging_future = None
+
+    def close(self):
+        if self.executor is None:
+            return
+        try:
+            self.wait_for_completion()
+        finally:
+            self.executor.shutdown(wait=True, cancel_futures=False)
+            self.executor = None
 
 
 class EpochRecorder:
@@ -837,30 +975,42 @@ def run(
             print(f"ECAPA timbre validation disabled: {error}")
             timbre_validator = None
 
-    for epoch in range(epoch_str, total_epoch + 1):
-        train_and_evaluate(
-            rank,
-            epoch,
-            config,
-            [net_g, net_d],
-            [optim_g, optim_d],
-            [train_loader, None],
-            [writer_eval],
-            cache,
-            custom_save_every_weights,
-            custom_total_epoch,
-            device,
-            device_id,
-            audio_reference,
-            timbre_validator,
-            timbre_reference,
-            timbre_is_held_out,
-            fn_mel_loss,
-            scaler,
+    inference_exporter = None
+    if rank == 0 and save_every_steps > 0:
+        export_device = (
+            torch.device("cuda", device_id) if device.type == "cuda" else device
         )
+        inference_exporter = AsyncInferenceExporter(export_device)
 
-        scheduler_g.step()
-        scheduler_d.step()
+    try:
+        for epoch in range(epoch_str, total_epoch + 1):
+            train_and_evaluate(
+                rank,
+                epoch,
+                config,
+                [net_g, net_d],
+                [optim_g, optim_d],
+                [train_loader, None],
+                [writer_eval],
+                cache,
+                custom_save_every_weights,
+                custom_total_epoch,
+                device,
+                device_id,
+                audio_reference,
+                timbre_validator,
+                timbre_reference,
+                timbre_is_held_out,
+                fn_mel_loss,
+                scaler,
+                inference_exporter,
+            )
+
+            scheduler_g.step()
+            scheduler_d.step()
+    finally:
+        if inference_exporter is not None:
+            inference_exporter.close()
 
 
 def train_and_evaluate(
@@ -882,6 +1032,7 @@ def train_and_evaluate(
     timbre_is_held_out,
     fn_mel_loss,
     scaler,
+    inference_exporter,
 ):
     """
     Trains and evaluates the model for one epoch.
@@ -910,7 +1061,6 @@ def train_and_evaluate(
     net_g.train()
     net_d.train()
     freeze_discriminator_for_generator = device.type == "cuda"
-    generator_discriminator = net_d.module if isinstance(net_d, DDP) else net_d
 
     use_amp = device.type == "cuda" and (
         train_dtype == torch.bfloat16 or train_dtype == torch.float16
@@ -930,6 +1080,7 @@ def train_and_evaluate(
         data_iterator = enumerate(train_loader)
 
     epoch_recorder = EpochRecorder()
+    scalar_buffer = []
     with tqdm(total=len(train_loader), leave=False) as pbar:
         for batch_idx, info in data_iterator:
             if device.type == "cuda" and not cache_data_in_gpu:
@@ -949,6 +1100,10 @@ def train_and_evaluate(
                 wave_lengths,
                 sid,
             ) = info
+
+            log_grad_norms = (
+                rank == 0 and (global_step + 1) % grad_norm_log_interval == 0
+            )
 
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
@@ -978,23 +1133,25 @@ def train_and_evaluate(
                 optim_d.zero_grad()
                 if train_dtype == torch.float16:
                     scaler.scale(loss_disc).backward()
-                    scaler.unscale_(optim_d)
-                    grad_norm_d = commons.grad_norm(net_d.parameters())
+                    if log_grad_norms:
+                        scaler.unscale_(optim_d)
+                        grad_norm_d = commons.grad_norm(net_d.parameters())
                     scaler.step(optim_d)
                 else:
                     loss_disc.backward()
-                    grad_norm_d = commons.grad_norm(net_d.parameters())
+                    if log_grad_norms:
+                        grad_norm_d = commons.grad_norm(net_d.parameters())
                     optim_d.step()
 
             if freeze_discriminator_for_generator:
                 optim_d.zero_grad(set_to_none=True)
-                generator_discriminator.requires_grad_(False)
+                net_d.requires_grad_(False)
 
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
             ):
                 # Generator backward and update
-                _, y_d_hat_g, fmap_r, fmap_g = generator_discriminator(wave, y_hat)
+                _, y_d_hat_g, fmap_r, fmap_g = net_d(wave, y_hat)
 
             if multiscale_mel_loss:
                 loss_mel = fn_mel_loss(wave, y_hat) * config.train.c_mel / 3.0
@@ -1053,61 +1210,57 @@ def train_and_evaluate(
             optim_g.zero_grad()
             if train_dtype == torch.float16:
                 scaler.scale(loss_gen_all).backward()
-                scaler.unscale_(optim_g)
-                grad_norm_g = commons.grad_norm(net_g.parameters())
+                if log_grad_norms:
+                    scaler.unscale_(optim_g)
+                    grad_norm_g = commons.grad_norm(net_g.parameters())
+                if inference_exporter is not None:
+                    inference_exporter.wait_for_staging()
                 scaler.step(optim_g)
                 scaler.update()
             else:
                 loss_gen_all.backward()
-                grad_norm_g = commons.grad_norm(net_g.parameters())
+                if log_grad_norms:
+                    grad_norm_g = commons.grad_norm(net_g.parameters())
+                if inference_exporter is not None:
+                    inference_exporter.wait_for_staging()
                 optim_g.step()
 
             if freeze_discriminator_for_generator:
-                generator_discriminator.requires_grad_(True)
+                net_d.requires_grad_(True)
 
             global_step += 1
 
             if rank == 0:
-                (
-                    loss_gen_all_value,
-                    loss_disc_value,
-                    loss_gen_value,
-                    loss_fm_value,
-                    loss_mel_value,
-                    loss_kl_value,
-                ) = (
-                    torch.stack(
-                        (
-                            loss_gen_all.detach(),
-                            loss_disc.detach(),
-                            loss_gen.detach(),
-                            loss_fm.detach(),
-                            loss_mel.detach(),
-                            loss_kl.detach(),
-                        )
-                    )
-                    .float()
-                    .cpu()
-                    .tolist()
-                )
-                summarize(
-                    writer=writer,
-                    global_step=global_step,
-                    scalars={
-                        "loss/g/total": loss_gen_all_value,
-                        "loss/d/adv": loss_disc_value,
-                        "learning_rate": optim_g.param_groups[0]["lr"],
+                gradient_norms = (
+                    {
                         "grad/norm_d": grad_norm_d,
                         "grad/norm_g": grad_norm_g,
-                        "loss/g/adv": loss_gen_value,
-                        "loss/g/fm": loss_fm_value,
-                        "loss/g/mel": loss_mel_value,
-                        "loss/g/kl": loss_kl_value,
-                    },
+                    }
+                    if log_grad_norms
+                    else {}
                 )
+                scalar_buffer.append(
+                    (
+                        global_step,
+                        torch.stack(
+                            (
+                                loss_gen_all.detach(),
+                                loss_disc.detach(),
+                                loss_gen.detach(),
+                                loss_fm.detach(),
+                                loss_mel.detach(),
+                                loss_kl.detach(),
+                            )
+                        ).float(),
+                        optim_g.param_groups[0]["lr"],
+                        gradient_norms,
+                    )
+                )
+                if len(scalar_buffer) >= scalar_log_buffer_size:
+                    flush_scalar_buffer(writer, scalar_buffer)
 
             if (
-                rank == 0
+                inference_exporter is not None
                 and save_every_steps > 0
                 and global_step % save_every_steps == 0
             ):
@@ -1115,13 +1268,12 @@ def train_and_evaluate(
                     experiment_dir, f"{model_name}_{epoch}e_{global_step}s.pth"
                 )
                 if not os.path.exists(inference_model_path):
-                    inference_ckpt = (
-                        net_g.module.state_dict()
-                        if hasattr(net_g, "module")
-                        else net_g.state_dict()
+                    inference_model = (
+                        net_g.module if hasattr(net_g, "module") else net_g
                     )
-                    extract_model(
-                        ckpt=inference_ckpt,
+                    inference_exporter.submit(
+                        model=inference_model,
+                        export_dtype=inference_export_dtype,
                         sr=config.data.sample_rate,
                         name=model_name,
                         model_path=inference_model_path,
@@ -1129,7 +1281,6 @@ def train_and_evaluate(
                         step=global_step,
                         hps=hps,
                         vocoder=vocoder,
-                        export_dtype=inference_export_dtype,
                     )
 
             pbar.update(1)
@@ -1138,6 +1289,7 @@ def train_and_evaluate(
 
     # Logging and checkpointing
     if rank == 0:
+        flush_scalar_buffer(writer, scalar_buffer)
         # used for tensorboard chart - all/mel
         mel = spec_to_mel_torch(
             spec,
@@ -1308,6 +1460,9 @@ def train_and_evaluate(
             )
             done = True
 
+        if done and inference_exporter is not None:
+            inference_exporter.wait_for_completion()
+
         # Clean-up old best epochs
         for m in model_del:
             os.remove(m)
@@ -1333,6 +1488,8 @@ def train_and_evaluate(
                     )
 
         if done:
+            if inference_exporter is not None:
+                inference_exporter.close()
             writer.close()
             os._exit(2333333)
 
