@@ -10,7 +10,6 @@ from collections import defaultdict, deque
 from random import randint, shuffle
 from time import time as ttime
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -608,6 +607,10 @@ def run(
         config.train.seed,
         max(8, batch_size * n_gpus * 3),
     )
+    audio_reference = None
+    if rank == 0 and timbre_is_held_out and timbre_reference is not None:
+        audio_reference = tuple(value[:1] for value in timbre_reference[0])
+        print("TensorBoard audio validation uses one held-out dataset clip.")
     train_sampler = DistributedBucketSampler(
         train_dataset,
         batch_size,
@@ -636,13 +639,11 @@ def run(
         os._exit(2333333)
 
     # defaults
-    embedder_name = "contentvec"
     spk_dim = config.model.spk_embed_dim  # 109 default speakers
 
     try:
         with open(model_info_path, "r", encoding="utf-8") as f:
             model_info = json.load(f)
-            embedder_name = model_info["embedder_model"]
             spk_dim = model_info["speakers_id"]
     except Exception as e:
         print(f"Could not load model info file: {e}. Using defaults.")
@@ -805,39 +806,6 @@ def run(
         scaler.load_state_dict(scaler_dict)
 
     cache = []
-    # collect the reference audio for tensorboard evaluation
-    if os.path.isfile(os.path.join("logs", "reference", embedder_name, "feats.npy")):
-        print("Using", embedder_name, "reference set for validation")
-        phone = np.load(os.path.join("logs", "reference", embedder_name, "feats.npy"))
-        # expanding x2 to match pitch size
-        phone = np.repeat(phone, 2, axis=0)
-        phone_lengths = torch.LongTensor([phone.shape[0]]).to(device)
-        phone = torch.FloatTensor(phone).unsqueeze(0).to(device)
-        pitch = np.load(os.path.join("logs", "reference", "pitch_coarse.npy"))
-        # removed last frame to match features
-        pitch = torch.LongTensor(pitch[:-1]).unsqueeze(0).to(device)
-        pitchf = np.load(os.path.join("logs", "reference", "pitch_fine.npy"))
-        # removed last frame to match features
-        pitchf = torch.FloatTensor(pitchf[:-1]).unsqueeze(0).to(device)
-        sid = torch.LongTensor([0]).to(device)
-        reference = (
-            phone,
-            phone_lengths,
-            pitch,
-            pitchf,
-            sid,
-        )
-    else:
-        print("No custom reference found, using a default audio sample for validation")
-        info = next(iter(train_loader))
-        phone, phone_lengths, pitch, pitchf, _, _, _, _, sid = info
-        reference = (
-            phone.to(device),
-            phone_lengths.to(device),
-            pitch.to(device),
-            pitchf.to(device),
-            sid.to(device),
-        )
 
     timbre_validator = None
     if rank == 0:
@@ -892,7 +860,7 @@ def run(
             custom_total_epoch,
             device,
             device_id,
-            reference,
+            audio_reference,
             timbre_validator,
             timbre_reference,
             timbre_is_held_out,
@@ -917,7 +885,7 @@ def train_and_evaluate(
     custom_total_epoch,
     device,
     device_id,
-    reference,
+    audio_reference,
     timbre_validator,
     timbre_reference,
     timbre_is_held_out,
@@ -1240,6 +1208,7 @@ def train_and_evaluate(
             inference_model = net_g.module if hasattr(net_g, "module") else net_g
             inference_model.eval()
             rng_devices = [device_id] if device.type == "cuda" else []
+            audio_o = None
             timbre_o = None
             try:
                 with torch.random.fork_rng(devices=rng_devices):
@@ -1248,7 +1217,8 @@ def train_and_evaluate(
                         device_type="cuda", enabled=use_amp, dtype=train_dtype
                     ):
                         with torch.inference_mode():
-                            o, *_ = inference_model.infer(*reference)
+                            if audio_reference is not None:
+                                audio_o, *_ = inference_model.infer(*audio_reference)
                             if timbre_validator is not None:
                                 try:
                                     timbre_o, *_ = inference_model.infer(
@@ -1296,7 +1266,9 @@ def train_and_evaluate(
                         )
                 except Exception as error:
                     print(f"ECAPA timbre validation failed: {error}")
-            audio_dict = {f"gen/audio_{global_step:07d}": o[0, :, :]}
+            audio_dict = {}
+            if audio_o is not None:
+                audio_dict[f"gen/audio_{global_step:07d}"] = audio_o[0, :, :]
             summarize(
                 writer=writer,
                 global_step=global_step,
