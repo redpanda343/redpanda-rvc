@@ -47,12 +47,10 @@ def get_embedding_metadata(embedder_model, custom_embedder=None):
         model_path = os.path.join(embedder_root, "contentvec")
         embedder_model = "contentvec"
     if embedder_model == "spin-wavlm-512":
+        from rvc.lib.tools.convert_spin_wavlm import ensure_converted
+
+        ensure_converted(model_path)
         config_path = os.path.join(model_path, "spin_config.json")
-        if not os.path.isfile(config_path):
-            raise FileNotFoundError(
-                "SPIN WavLM 512 has not been converted. Run "
-                "rvc/lib/tools/convert_spin_wavlm.py first."
-            )
         with open(config_path, "r", encoding="utf-8") as config_file:
             spin_config = json.load(config_file)
         return {
@@ -165,23 +163,9 @@ def load_embedding(embedder_model, custom_embedder=None):
     else:
         model_path = embedding_list[embedder_model]
         if embedder_model == "spin-wavlm-512":
-            required_files = (
-                "config.json",
-                "model.safetensors",
-                "spin_config.json",
-                "spin_projection.safetensors",
-            )
-            missing_files = [
-                name
-                for name in required_files
-                if not os.path.isfile(os.path.join(model_path, name))
-            ]
-            if missing_files:
-                raise FileNotFoundError(
-                    "SPIN WavLM 512 has not been converted. Missing: "
-                    + ", ".join(missing_files)
-                    + ". Run rvc/lib/tools/convert_spin_wavlm.py first."
-                )
+            from rvc.lib.tools.convert_spin_wavlm import ensure_converted
+
+            ensure_converted(model_path)
             return SpinWavLMModel(model_path)
         bin_file = os.path.join(model_path, "pytorch_model.bin")
         json_file = os.path.join(model_path, "config.json")

@@ -3,14 +3,26 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 
+import requests
 import torch
 from safetensors.torch import save_file
+from tqdm import tqdm
 from transformers import WavLMConfig, WavLMModel
 
 
-EXPECTED_SHA256 = "1915d2a05e69a33fa644de4db206232a3b2d1d7ca57de7e089c8d7a431dd0340"
-SOURCE_URL = "https://huggingface.co/datasets/vectominist/spin_ckpt/resolve/main/spin_wavlm_512.ckpt"
+EXPECTED_SHA256 = "bf9faa02f07a2904153e29583fe044d7974cc9bd46e183080b0b21e9777f21af"
+EXPECTED_SIZE = 835355303
+SOURCE_FILENAME = "epoch=0-step=5000.ckpt"
+SOURCE_URL = "https://huggingface.co/lyery/spin-wavlm512/resolve/main/epoch%3D0-step%3D5000.ckpt"
+REQUIRED_FILES = (
+    "config.json",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "spin_config.json",
+    "spin_projection.safetensors",
+)
 
 
 class WandbLogger:
@@ -23,6 +35,64 @@ def file_sha256(path):
         for chunk in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def converted_bundle_is_current(output_path):
+    if any(
+        not os.path.isfile(os.path.join(output_path, name))
+        for name in REQUIRED_FILES
+    ):
+        return False
+    try:
+        with open(
+            os.path.join(output_path, "spin_config.json"), "r", encoding="utf-8"
+        ) as config_file:
+            spin_config = json.load(config_file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return spin_config.get("source_checkpoint_sha256") == EXPECTED_SHA256
+
+
+def download_checkpoint(destination):
+    temporary_path = destination + ".part"
+    try:
+        print(f"Downloading SPIN WavLM 512 from {SOURCE_URL}...")
+        with requests.get(
+            SOURCE_URL,
+            stream=True,
+            headers={"Accept-Encoding": "identity"},
+            timeout=(10, 120),
+        ) as response:
+            response.raise_for_status()
+            bytes_written = 0
+            with open(temporary_path, "wb") as checkpoint_file:
+                with tqdm(
+                    total=EXPECTED_SIZE,
+                    unit="iB",
+                    unit_scale=True,
+                    desc="Downloading SPIN WavLM 512",
+                ) as progress:
+                    for chunk in response.iter_content(1024 * 1024):
+                        if not chunk:
+                            continue
+                        checkpoint_file.write(chunk)
+                        bytes_written += len(chunk)
+                        progress.update(len(chunk))
+        if bytes_written != EXPECTED_SIZE:
+            raise IOError(
+                f"Incomplete SPIN checkpoint: expected {EXPECTED_SIZE} bytes, "
+                f"received {bytes_written}"
+            )
+        actual_sha256 = file_sha256(temporary_path)
+        if actual_sha256 != EXPECTED_SHA256:
+            raise IOError(
+                f"Unexpected checkpoint SHA-256: {actual_sha256}. "
+                f"Expected {EXPECTED_SHA256}."
+            )
+        os.replace(temporary_path, destination)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def load_checkpoint(path):
@@ -45,6 +115,7 @@ def validate_recipe(checkpoint):
     expected = {
         "encoder_type": (encoder["type"], "WavLM"),
         "use_layer": (encoder["use_layer"], 12),
+        "freeze_layers": (encoder["freeze_layers"], ["pos", 0, 1, 2, 3, 4]),
         "projection": (prediction["hid_dims"], [256]),
         "clusters": (loss["num_vars"], 512),
         "l2_norm": (loss["l2_norm"], True),
@@ -184,6 +255,30 @@ def convert(checkpoint_path, output_path):
         f"Converted SPIN WavLM 512 to {output_path} with SHA-256 "
         f"{checkpoint_sha256}."
     )
+
+
+def ensure_converted(output_path):
+    output_path = os.path.abspath(output_path)
+    if converted_bundle_is_current(output_path):
+        return
+    parent_path = os.path.dirname(output_path)
+    os.makedirs(parent_path, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".spin-wavlm-512-", dir=parent_path
+    ) as temporary_directory:
+        checkpoint_path = os.path.join(temporary_directory, SOURCE_FILENAME)
+        converted_path = os.path.join(temporary_directory, "converted")
+        download_checkpoint(checkpoint_path)
+        convert(checkpoint_path, converted_path)
+        if not converted_bundle_is_current(converted_path):
+            raise RuntimeError("Converted SPIN WavLM 512 bundle failed validation")
+        os.makedirs(output_path, exist_ok=True)
+        for name in REQUIRED_FILES:
+            os.replace(
+                os.path.join(converted_path, name), os.path.join(output_path, name)
+            )
+    if not converted_bundle_is_current(output_path):
+        raise RuntimeError("SPIN WavLM 512 installation failed validation")
 
 
 def main():
