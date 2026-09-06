@@ -540,7 +540,7 @@ with gr.Blocks(
         with gr.Tab(i18n("Training")):
             train_tab()
 
-        with gr.Tab(i18n("One-click Train")):
+        with gr.Tab(i18n("One-click Training")):
             one_click_train_tab()
 
         with gr.Tab(i18n("Voice Blender")):

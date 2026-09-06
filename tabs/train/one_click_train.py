@@ -29,6 +29,7 @@ custom_presets_lock = threading.RLock()
 DEFAULT_TRAINING_PRESETS = {
     "32k hifigan,cvec": {
         "sampling_rate": "32000",
+        "vocoder": "HiFi-GAN",
         "batch_size": 8,
         "total_epoch": 200,
         "save_every_epoch": 10,
@@ -57,6 +58,7 @@ DEFAULT_TRAINING_PRESETS = {
     },
     "32k From scratch": {
         "sampling_rate": "32000",
+        "vocoder": "HiFi-GAN",
         "batch_size": 16,
         "total_epoch": 2000,
         "save_every_epoch": 10,
@@ -94,16 +96,19 @@ def _load_custom_presets():
         return {}
     if not isinstance(presets, dict):
         return {}
-    required_fields = set(next(iter(DEFAULT_TRAINING_PRESETS.values())))
-    return {
-        name: settings
-        for name, settings in presets.items()
-        if isinstance(name, str)
-        and name.strip()
-        and isinstance(settings, dict)
-        and required_fields.issubset(settings)
-        and name not in DEFAULT_TRAINING_PRESETS
-    }
+    defaults = next(iter(DEFAULT_TRAINING_PRESETS.values()))
+    required_fields = set(defaults) - {"vocoder"}
+    loaded_presets = {}
+    for name, settings in presets.items():
+        if (
+            isinstance(name, str)
+            and name.strip()
+            and isinstance(settings, dict)
+            and required_fields.issubset(settings)
+            and name not in DEFAULT_TRAINING_PRESETS
+        ):
+            loaded_presets[name] = defaults | settings
+    return loaded_presets
 
 
 TRAINING_PRESETS = {
@@ -118,8 +123,14 @@ def _failed(message):
 
 def _apply_preset(preset_name):
     preset = TRAINING_PRESETS[preset_name]
+    sample_rate_choices = (
+        ["24000", "32000"]
+        if preset["vocoder"] == "RefineGAN"
+        else ["32000", "40000", "48000"]
+    )
     return (
-        preset["sampling_rate"],
+        gr.update(choices=sample_rate_choices, value=preset["sampling_rate"]),
+        preset["vocoder"],
         preset["batch_size"],
         preset["total_epoch"],
         preset["save_every_epoch"],
@@ -157,6 +168,7 @@ def _apply_preset(preset_name):
 def _save_custom_preset(
     preset_name,
     sampling_rate,
+    vocoder,
     batch_size,
     total_epoch,
     save_every_epoch,
@@ -195,6 +207,7 @@ def _save_custom_preset(
 
     settings = {
         "sampling_rate": str(sampling_rate),
+        "vocoder": vocoder,
         "batch_size": int(batch_size),
         "total_epoch": int(total_epoch),
         "save_every_epoch": int(save_every_epoch),
@@ -272,6 +285,16 @@ def _custom_pretrained_visibility(pretrained_mode):
     return gr.update(visible=pretrained_mode == "Custom pretrained")
 
 
+def _sampling_rate_for_vocoder(vocoder, sampling_rate):
+    choices = (
+        ["24000", "32000"]
+        if vocoder == "RefineGAN"
+        else ["32000", "40000", "48000"]
+    )
+    value = sampling_rate if sampling_rate in choices else "32000"
+    return gr.update(choices=choices, value=value)
+
+
 def _training_ui_state(model_name):
     state = get_train_state(model_name)
     status = state.get("status", "idle")
@@ -291,6 +314,7 @@ def _run_one_click_training(
     model_name,
     dataset_path,
     sampling_rate,
+    vocoder,
     cut_preprocess,
     normalization_mode,
     dataset_format,
@@ -335,6 +359,15 @@ def _run_one_click_training(
         return gr.update(interactive=False), message
     if cut_preprocess == "Simple" and float(overlap_len) >= float(chunk_len):
         message = "Overlap length must be shorter than chunk length."
+        gr.Warning(message)
+        return gr.update(interactive=True), message
+    valid_sample_rates = (
+        {"24000", "32000"}
+        if vocoder == "RefineGAN"
+        else {"32000", "40000", "48000"}
+    )
+    if str(sampling_rate) not in valid_sample_rates:
+        message = f"{sampling_rate} Hz is not available for {vocoder}."
         gr.Warning(message)
         return gr.update(interactive=True), message
 
@@ -405,7 +438,7 @@ def _run_one_click_training(
         custom_pretrained=custom_pretrained,
         g_pretrained_path=g_pretrained_path,
         d_pretrained_path=d_pretrained_path,
-        vocoder="HiFi-GAN",
+        vocoder=vocoder,
         checkpointing=checkpointing,
         shutdown_check=False,
         save_every_steps=0,
@@ -469,6 +502,16 @@ def one_click_train_tab():
                 choices=["32000", "40000", "48000"],
                 value="32000",
                 label=i18n("Sampling Rate"),
+                interactive=True,
+            )
+            vocoder = gr.Radio(
+                choices=["HiFi-GAN", "RefineGAN"],
+                value="HiFi-GAN",
+                label=i18n("Vocoder"),
+                info=i18n(
+                    "HiFi-GAN supports 32, 40, and 48 kHz. RefineGAN supports "
+                    "24 and 32 kHz."
+                ),
                 interactive=True,
             )
             cut_preprocess = gr.Radio(
@@ -657,10 +700,11 @@ def one_click_train_tab():
         max_lines=3,
         interactive=False,
     )
-    one_click_button = gr.Button(i18n("One-click Train"), variant="primary")
+    one_click_button = gr.Button(i18n("One-click Training"), variant="primary")
 
     preset_outputs = [
         sampling_rate,
+        vocoder,
         batch_size,
         total_epoch,
         save_every_epoch,
@@ -701,6 +745,7 @@ def one_click_train_tab():
         inputs=[
             custom_preset_name,
             sampling_rate,
+            vocoder,
             batch_size,
             total_epoch,
             save_every_epoch,
@@ -748,6 +793,12 @@ def one_click_train_tab():
         outputs=[custom_pretrained_settings],
         queue=False,
     )
+    vocoder.input(
+        fn=_sampling_rate_for_vocoder,
+        inputs=[vocoder, sampling_rate],
+        outputs=[sampling_rate],
+        queue=False,
+    )
 
     one_click_button.click(
         fn=_run_one_click_training,
@@ -755,6 +806,7 @@ def one_click_train_tab():
             model_name,
             dataset_path,
             sampling_rate,
+            vocoder,
             cut_preprocess,
             normalization_mode,
             dataset_format,
