@@ -183,6 +183,13 @@ class Pipeline:
             feats = (
                 model.final_proj(feats[0]).unsqueeze(0) if version == "v1" else feats
             )
+            expected_dim = int(net_g.enc_p.emb_phone.in_features)
+            if feats.shape[-1] != expected_dim:
+                raise RuntimeError(
+                    f"The selected embedder outputs {feats.shape[-1]} channels, but "
+                    f"this voice model expects {expected_dim}. Select the embedder used "
+                    "during training."
+                )
             # make a copy for pitch guidance and protection
             feats0 = feats.clone() if pitch_guidance else None
             if (
@@ -228,6 +235,11 @@ class Pipeline:
         return audio1
 
     def _retrieve_speaker_embeddings(self, feats, index, big_npy, index_rate):
+        if int(index.d) != feats.shape[-1]:
+            raise RuntimeError(
+                f"The selected index has {index.d} channels, but the embedder outputs "
+                f"{feats.shape[-1]}. Select the index created for this voice model."
+            )
         npy = feats[0].cpu().numpy()
         score, ix = index.search(npy, k=8)
         weight = np.square(1 / score)

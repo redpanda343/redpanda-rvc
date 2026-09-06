@@ -22,6 +22,7 @@ praat-parselmouth
 torchfcpe==0.0.4
 einops==0.8.2
 transformers==5.13.1
+safetensors==0.8.0
 
 matplotlib==3.11.0
 tensorboard==2.21.0

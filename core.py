@@ -635,6 +635,21 @@ def _build_train_command(
     checkpointing: bool = False,
     save_every_steps: int = 0,
 ):
+    model_config_path = os.path.join("logs", model_name, "config.json")
+    feature_dim = 768
+    if os.path.isfile(model_config_path):
+        with open(model_config_path, "r", encoding="utf-8") as config_file:
+            feature_dim = int(
+                json.load(config_file).get("model", {}).get(
+                    "text_enc_hidden_dim", 768
+                )
+            )
+    if pretrained and not custom_pretrained and feature_dim != 768:
+        raise ValueError(
+            f"The bundled generator pretrained models expect 768-channel features, "
+            f"but this experiment uses {feature_dim}. Disable Pretrained to train from "
+            "scratch, or select a matching custom pretrained generator."
+        )
     if pretrained == True:
         from rvc.lib.tools.pretrained_selector import pretrained_selector
 
@@ -986,6 +1001,7 @@ def _infer_opts(func):
                 [
                     "contentvec",
                     "spin-v2",
+                    "spin-wavlm-512",
                     "custom",
                 ]
             ),
@@ -1277,6 +1293,7 @@ def preprocess(**kwargs):
         [
             "contentvec",
             "spin-v2",
+            "spin-wavlm-512",
             "custom",
         ]
     ),

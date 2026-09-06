@@ -76,8 +76,17 @@ def export_generator_checkpoint(checkpoint_path, precision, output_name=None):
     epoch = int(checkpoint.get("iteration", 0))
     step = _checkpoint_step(checkpoint_path)
     model_name = os.path.basename(model_dir)
-    version = "v2" if getattr(hps.model, "text_enc_hidden_dim", 768) == 768 else "v1"
     vocoder = _detect_vocoder(state_dict)
+    feature_dim = int(getattr(hps.model, "text_enc_hidden_dim", 768))
+    embedder_model = None
+    model_info_path = os.path.join(model_dir, "model_info.json")
+    if os.path.isfile(model_info_path):
+        with open(model_info_path, "r", encoding="utf-8") as model_info_file:
+            embedder_model = json.load(model_info_file).get("embedder_model")
+    if feature_dim == 256 and embedder_model != "spin-wavlm-512":
+        version = "v1"
+    else:
+        version = "v3" if vocoder == "RefineGAN" else "v2"
     export_dtype = torch.float16 if precision == "fp16" else torch.float32
 
     checkpoint_label = f"{epoch}e"

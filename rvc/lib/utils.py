@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import soxr
@@ -12,6 +13,8 @@ from torch import nn
 import logging
 from transformers import AutoFeatureExtractor, HubertModel
 import warnings
+
+from rvc.lib.embedders.spin_wavlm import SpinWavLMModel
 
 # Remove this to see warnings about transformers models
 warnings.filterwarnings("ignore")
@@ -29,6 +32,50 @@ class HubertModelWithFinalProj(HubertModel):
     def __init__(self, config):
         super().__init__(config)
         self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
+
+
+def get_embedding_metadata(embedder_model, custom_embedder=None):
+    embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
+    chosen_model = custom_embedder if embedder_model == "custom" else embedder_model
+    model_path = (
+        custom_embedder
+        if embedder_model == "custom"
+        else os.path.join(embedder_root, embedder_model)
+    )
+    if embedder_model == "custom" and not os.path.exists(str(model_path)):
+        chosen_model = "contentvec"
+        model_path = os.path.join(embedder_root, "contentvec")
+        embedder_model = "contentvec"
+    if embedder_model == "spin-wavlm-512":
+        config_path = os.path.join(model_path, "spin_config.json")
+        if not os.path.isfile(config_path):
+            raise FileNotFoundError(
+                "SPIN WavLM 512 has not been converted. Run "
+                "rvc/lib/tools/convert_spin_wavlm.py first."
+            )
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            spin_config = json.load(config_file)
+        return {
+            "embedder_model": chosen_model,
+            "feature_dim": int(spin_config["feature_dim"]),
+            "feature_output": spin_config["feature_output"],
+            "feature_fingerprint": spin_config["source_checkpoint_sha256"],
+        }
+
+    feature_dim = 768
+    if embedder_model == "custom" and model_path:
+        config_path = os.path.join(model_path, "config.json")
+        try:
+            with open(config_path, "r", encoding="utf-8") as config_file:
+                feature_dim = int(json.load(config_file).get("hidden_size", 768))
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return {
+        "embedder_model": chosen_model,
+        "feature_dim": feature_dim,
+        "feature_output": "last_hidden_state",
+        "feature_fingerprint": str(chosen_model),
+    }
 
 
 def load_audio_16k(file):
@@ -93,6 +140,7 @@ def load_embedding(embedder_model, custom_embedder=None):
     embedding_list = {
         "contentvec": os.path.join(embedder_root, "contentvec"),
         "spin-v2": os.path.join(embedder_root, "spin-v2"),
+        "spin-wavlm-512": os.path.join(embedder_root, "spin-wavlm-512"),
     }
 
     online_embedders = {
@@ -116,6 +164,25 @@ def load_embedding(embedder_model, custom_embedder=None):
             model_path = embedding_list["contentvec"]
     else:
         model_path = embedding_list[embedder_model]
+        if embedder_model == "spin-wavlm-512":
+            required_files = (
+                "config.json",
+                "model.safetensors",
+                "spin_config.json",
+                "spin_projection.safetensors",
+            )
+            missing_files = [
+                name
+                for name in required_files
+                if not os.path.isfile(os.path.join(model_path, name))
+            ]
+            if missing_files:
+                raise FileNotFoundError(
+                    "SPIN WavLM 512 has not been converted. Missing: "
+                    + ", ".join(missing_files)
+                    + ". Run rvc/lib/tools/convert_spin_wavlm.py first."
+                )
+            return SpinWavLMModel(model_path)
         bin_file = os.path.join(model_path, "pytorch_model.bin")
         json_file = os.path.join(model_path, "config.json")
         preprocessor_json_file = os.path.join(
@@ -147,4 +214,13 @@ def load_embedding(embedder_model, custom_embedder=None):
         models.audio_requires_normalization = bool(feature_extractor.do_normalize)
     else:
         models.audio_requires_normalization = False
+    metadata = get_embedding_metadata(
+        "contentvec"
+        if embedder_model == "custom" and model_path == embedding_list["contentvec"]
+        else embedder_model,
+        custom_embedder,
+    )
+    models.feature_dim = metadata["feature_dim"]
+    models.feature_output = metadata["feature_output"]
+    models.feature_fingerprint = metadata["feature_fingerprint"]
     return models

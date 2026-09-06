@@ -596,7 +596,7 @@ def one_click_train_tab():
                 interactive=True,
             )
             embedder_model = gr.Radio(
-                choices=["contentvec", "spin-v2"],
+                choices=["contentvec", "spin-v2", "spin-wavlm-512"],
                 value="contentvec",
                 label=i18n("Embedder Model"),
                 interactive=True,

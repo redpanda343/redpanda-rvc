@@ -400,9 +400,20 @@ class VoiceConverter:
             chunks = prepared_chunks
             intervals = prepared_intervals
 
-        if not self.hubert_model or embedder_model != self.last_embedder_model:
+        expected_embedder = self.cpt.get("embedder_model")
+        built_in_embedders = {"contentvec", "spin-v2", "spin-wavlm-512"}
+        if (
+            expected_embedder in built_in_embedders
+            and embedder_model != expected_embedder
+        ):
+            raise RuntimeError(
+                f"This voice model was trained with {expected_embedder}, but "
+                f"{embedder_model} is selected."
+            )
+        embedder_key = (embedder_model, embedder_model_custom)
+        if not self.hubert_model or embedder_key != self.last_embedder_model:
             self.load_hubert(embedder_model, embedder_model_custom)
-            self.last_embedder_model = embedder_model
+            self.last_embedder_model = embedder_key
 
         file_index = (
             index_path.strip()
@@ -633,7 +644,10 @@ class VoiceConverter:
             self.use_f0 = self.cpt.get("f0", 1)
 
             self.version = self.cpt.get("version", "v1")
-            self.text_enc_hidden_dim = 768 if self.version == "v2" else 256
+            legacy_feature_dim = 768 if self.version in {"v2", "v3"} else 256
+            self.text_enc_hidden_dim = int(
+                self.cpt.get("feature_dim", legacy_feature_dim)
+            )
             self.vocoder = self.cpt.get("vocoder", "HiFi-GAN")
             self.net_g = Synthesizer(
                 *self.cpt["config"],

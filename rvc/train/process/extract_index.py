@@ -29,10 +29,14 @@ else:
     npys = []
     print(f"Generating index for '{model_name}', this may take a while...")
     dataset_format = "wav"
+    expected_feature_dim = None
     model_info_path = os.path.join(exp_dir, "model_info.json")
     try:
         with open(model_info_path, "r", encoding="utf-8") as f:
-            dataset_format = str(json.load(f).get("dataset_format", "wav")).lower()
+            model_info = json.load(f)
+            dataset_format = str(model_info.get("dataset_format", "wav")).lower()
+            if model_info.get("feature_dim") is not None:
+                expected_feature_dim = int(model_info["feature_dim"])
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -57,6 +61,17 @@ else:
 
     for feature_path in feature_paths:
         phone = np.load(feature_path)
+        if phone.ndim != 2:
+            raise RuntimeError(
+                f"Feature file {feature_path} has shape {phone.shape}; expected two dimensions."
+            )
+        if expected_feature_dim is None:
+            expected_feature_dim = int(phone.shape[1])
+        if phone.shape[1] != expected_feature_dim:
+            raise RuntimeError(
+                f"Feature file {feature_path} has {phone.shape[1]} channels; "
+                f"expected {expected_feature_dim}."
+            )
         npys.append(phone)
 
     if not npys:
@@ -65,7 +80,7 @@ else:
         )
         sys.exit(1)
 
-    big_npy = np.concatenate(npys, axis=0)
+    big_npy = np.concatenate(npys, axis=0).astype(np.float32, copy=False)
 
     big_npy_idx = np.arange(big_npy.shape[0])
     np.random.shuffle(big_npy_idx)
@@ -74,7 +89,7 @@ else:
     if big_npy.shape[0] > 2e5 or index_algorithm == "KMeans":
         big_npy = (
             MiniBatchKMeans(
-                n_clusters=10000,
+                n_clusters=min(10000, big_npy.shape[0]),
                 verbose=True,
                 batch_size=256 * cpu_count(),
                 compute_labels=False,
@@ -84,10 +99,13 @@ else:
             .cluster_centers_
         )
 
-    n_ivf = min(int(16 * np.sqrt(big_npy.shape[0])), big_npy.shape[0] // 39)
+    feature_dim = int(big_npy.shape[1])
+    n_ivf = max(
+        1, min(int(16 * np.sqrt(big_npy.shape[0])), big_npy.shape[0] // 39)
+    )
 
     # index_added
-    index_added = faiss.index_factory(768, f"IVF{n_ivf},Flat")
+    index_added = faiss.index_factory(feature_dim, f"IVF{n_ivf},Flat")
     index_ivf_added = faiss.extract_index_ivf(index_added)
     index_ivf_added.nprobe = 1
     index_added.train(big_npy)

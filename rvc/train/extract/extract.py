@@ -18,7 +18,7 @@ sys.path.append(os.path.join(now_dir))
 import rvc.lib.zluda
 from rvc.configs.config import Config
 from rvc.lib.predictors.f0 import RMVPE
-from rvc.lib.utils import load_audio_16k, load_embedding
+from rvc.lib.utils import get_embedding_metadata, load_audio_16k, load_embedding
 from rvc.train.extract.preparing_files import generate_config, generate_filelist
 
 # Load config
@@ -161,15 +161,21 @@ def process_file_embedding(
         with torch.no_grad():
             result = model(feats)["last_hidden_state"]
         feats_out = result.squeeze(0).float().cpu().numpy()
-        if not np.isnan(feats_out).any():
-            np.save(out_file_path, feats_out, allow_pickle=False)
-        else:
-            print(f"{wav_file_path} produced NaN values; skipping.")
+        expected_dim = int(getattr(model, "feature_dim", feats_out.shape[-1]))
+        if feats_out.ndim != 2 or feats_out.shape[1] != expected_dim:
+            raise RuntimeError(
+                f"{wav_file_path} produced shape {feats_out.shape}; expected "
+                f"[frames, {expected_dim}]."
+            )
+        if not np.isfinite(feats_out).all():
+            raise RuntimeError(f"{wav_file_path} produced non-finite values.")
+        np.save(out_file_path, feats_out, allow_pickle=False)
 
     with tqdm.tqdm(total=len(files), leave=True, position=device_num) as pbar:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
             futures = [executor.submit(worker, f) for f in files]
-            for _ in concurrent.futures.as_completed(futures):
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
                 pbar.update(1)
 
 
@@ -194,7 +200,8 @@ def run_embedding_extraction(
             )
             for i in range(len(devices))
         ]
-        concurrent.futures.wait(tasks)
+        for task in concurrent.futures.as_completed(tasks):
+            task.result()
 
     print(f"Embedding extraction completed in {time.time() - start_time:.2f} seconds.")
 
@@ -221,9 +228,7 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(exp_dir, "f0_voiced"), exist_ok=True)
     os.makedirs(os.path.join(exp_dir, "extracted"), exist_ok=True)
 
-    chosen_embedder_model = (
-        embedder_model_custom if embedder_model == "custom" else embedder_model
-    )
+    metadata = get_embedding_metadata(embedder_model, embedder_model_custom)
     file_path = os.path.join(exp_dir, "model_info.json")
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
@@ -233,8 +238,37 @@ if __name__ == "__main__":
     dataset_format = str(data.get("dataset_format", "wav")).strip().lower()
     if dataset_format not in {"wav", "flac"}:
         dataset_format = "wav"
-    data["embedder_model"] = chosen_embedder_model
-    with open(file_path, "w") as f:
+    previous_embedder = data.get("embedder_model")
+    previous_dim = data.get("feature_dim")
+    previous_output = data.get("feature_output")
+    previous_fingerprint = data.get("feature_fingerprint")
+    feature_contract_changed = previous_embedder is not None and (
+        previous_embedder != metadata["embedder_model"]
+        or (previous_dim is not None and int(previous_dim) != metadata["feature_dim"])
+        or (
+            previous_output is not None
+            and previous_output != metadata["feature_output"]
+        )
+        or (
+            previous_fingerprint is not None
+            and previous_fingerprint != metadata["feature_fingerprint"]
+        )
+    )
+    if feature_contract_changed:
+        generator_checkpoints = glob.glob(os.path.join(exp_dir, "G_*.pth"))
+        if generator_checkpoints:
+            raise RuntimeError(
+                "This experiment already has resumable generator checkpoints for a "
+                "different embedder. Use a new model name or remove those checkpoints "
+                "before changing the embedder."
+            )
+        for stale_path in glob.glob(os.path.join(exp_dir, "extracted", "*.npy")):
+            os.remove(stale_path)
+        for stale_path in glob.glob(os.path.join(exp_dir, "*.index")):
+            os.remove(stale_path)
+        print("Embedder changed; removed stale features and indexes.")
+    data.update(metadata)
+    with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
     files = []

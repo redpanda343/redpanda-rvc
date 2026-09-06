@@ -35,17 +35,20 @@ def extract_model(
     hps,
     vocoder,
     pitch_guidance=True,
-    version="v2",
+    version=None,
     export_dtype=torch.float16,
 ):
     temporary_model_path = None
     try:
         model_dir = os.path.dirname(model_path)
         os.makedirs(model_dir, exist_ok=True)
+        if version is None:
+            version = "v3" if vocoder == "RefineGAN" else "v2"
 
         dataset_length = None
         embedder_model = None
         speakers_id = 1
+        feature_metadata = {}
         if os.path.exists(os.path.join(model_dir, "model_info.json")):
             with open(
                 os.path.join(model_dir, "model_info.json"), "r", encoding="utf-8"
@@ -54,6 +57,25 @@ def extract_model(
                 dataset_length = data.get("total_dataset_duration", None)
                 embedder_model = data.get("embedder_model", None)
                 speakers_id = data.get("speakers_id", 1)
+                feature_metadata = {
+                    key: data[key]
+                    for key in (
+                        "feature_dim",
+                        "feature_output",
+                        "feature_fingerprint",
+                    )
+                    if key in data
+                }
+
+        feature_dim = int(
+            feature_metadata.get(
+                "feature_dim", getattr(hps.model, "text_enc_hidden_dim", 768)
+            )
+        )
+        feature_output = feature_metadata.get(
+            "feature_output", "final_proj" if version == "v1" else "last_hidden_state"
+        )
+        feature_fingerprint = feature_metadata.get("feature_fingerprint")
 
         with open(
             os.path.join(now_dir, "assets", "config.json"), "r", encoding="utf-8"
@@ -102,12 +124,18 @@ def extract_model(
         opt["version"] = version
         opt["creation_date"] = datetime.datetime.now().isoformat()
 
-        hash_input = f"{name}-{epoch}-{step}-{sr}-{version}-{opt['config']}"
+        hash_input = (
+            f"{name}-{epoch}-{step}-{sr}-{version}-{opt['config']}-"
+            f"{feature_dim}-{feature_output}-{feature_fingerprint}"
+        )
         opt["model_hash"] = hashlib.sha256(hash_input.encode()).hexdigest()
         opt["dataset_length"] = dataset_length
         opt["model_name"] = name
         opt["author"] = model_author
         opt["embedder_model"] = embedder_model
+        opt["feature_dim"] = feature_dim
+        opt["feature_output"] = feature_output
+        opt["feature_fingerprint"] = feature_fingerprint
         opt["speakers_id"] = speakers_id
         opt["vocoder"] = vocoder
 
