@@ -134,4 +134,4 @@ def grad_norm(parameters, norm_type: float = 2.0):
         norm_type=float(norm_type),
         foreach=None,
     )
-    return total_norm.item()
+    return total_norm
