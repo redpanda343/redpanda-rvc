@@ -1366,7 +1366,7 @@ def train_and_evaluate(
                     if timbre_scores["multi_speaker"]:
                         scalar_dict.update(
                             {
-                                "validation/ecapa_cosine_mean": timbre_scores[
+                                "validation/voice_similarity": timbre_scores[
                                     "speaker_mean"
                                 ],
                                 "validation/ecapa_margin_mean": timbre_scores[
@@ -1382,7 +1382,7 @@ def train_and_evaluate(
                             }
                         )
                     else:
-                        scalar_dict["validation/ecapa_cosine_mean"] = timbre_scores[
+                        scalar_dict["validation/voice_similarity"] = timbre_scores[
                             "speaker_mean"
                         ]
                 except Exception as error:
