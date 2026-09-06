@@ -1326,8 +1326,6 @@ def train_and_evaluate(
                 ),
                 "all/mel": plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
             }
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
             inference_model = net_g.module if hasattr(net_g, "module") else net_g
             inference_model.eval()
             rng_devices = [device_id] if device.type == "cuda" else []
