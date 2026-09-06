@@ -10,7 +10,8 @@ import psutil
 
 
 STATE_FILE_NAME = "training_state.json"
-ACTIVE_STATES = {"running", "paused", "stopping"}
+PROCESS_ACTIVE_STATES = {"running", "paused", "stopping"}
+ACTIVE_STATES = PROCESS_ACTIVE_STATES | {"finalizing"}
 
 _state_lock = threading.RLock()
 
@@ -116,9 +117,24 @@ def _set_finished_message(logs_root, model_name, run_id, message):
     path = _state_path(logs_root, model_name)
     with _state_lock:
         state = _read_state(path)
+        if state.get("run_id") != run_id or state.get("status") not in {
+            "finished",
+            "finalizing",
+        }:
+            return
+        state["status"] = "finished"
+        state["message"] = message
+        _write_state(path, state)
+
+
+def _start_finalizing(logs_root, model_name, run_id):
+    path = _state_path(logs_root, model_name)
+    with _state_lock:
+        state = _read_state(path)
         if state.get("run_id") != run_id or state.get("status") != "finished":
             return
-        state["message"] = message
+        state["status"] = "finalizing"
+        state["message"] = "Training finished. Completing final steps."
         _write_state(path, state)
 
 
@@ -126,6 +142,7 @@ def _watch_training(process, logs_root, model_name, run_id, on_success):
     return_code = process.wait()
     _finish_training(logs_root, model_name, run_id, return_code)
     if return_code == 0 and on_success is not None:
+        _start_finalizing(logs_root, model_name, run_id)
         try:
             message = on_success()
         except Exception as error:
@@ -179,7 +196,10 @@ def get_training_state(logs_root, model_name):
         if not state:
             return {"status": "idle", "message": "Training is idle."}
 
-        if state.get("status") in ACTIVE_STATES and _root_process(state) is None:
+        if (
+            state.get("status") in PROCESS_ACTIVE_STATES
+            and _root_process(state) is None
+        ):
             previous_status = state.get("status")
             state.update(
                 {
@@ -281,6 +301,8 @@ def stop_training(logs_root, model_name, timeout=3):
     path = _state_path(logs_root, model_name)
     with _state_lock:
         state = get_training_state(logs_root, model_name)
+        if state.get("status") == "finalizing":
+            return "Training has finished and final steps are still running."
         if state.get("status") not in ACTIVE_STATES:
             return "There is no active training process to stop."
 

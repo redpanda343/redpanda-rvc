@@ -764,6 +764,7 @@ def start_train_script(
     checkpointing: bool = False,
     shutdown_check: bool = False,
     save_every_steps: int = 0,
+    generate_index: bool = False,
 ):
     command = _build_train_command(
         model_name,
@@ -787,9 +788,14 @@ def start_train_script(
     )
 
     on_success = None
-    if shutdown_check:
+    if generate_index or shutdown_check:
 
-        def shutdown_on_success():
+        def complete_training():
+            messages = ["Training finished successfully."]
+            if generate_index:
+                messages.append(run_index_script(model_name, index_algorithm))
+            if not shutdown_check:
+                return " ".join(messages)
             os_name, shutdown_datetime = shutdown_after_training()
             append_data_shutdown_log(
                 model_name=model_name,
@@ -800,9 +806,10 @@ def start_train_script(
                 shutdown_time=shutdown_datetime,
                 os_name=os_name,
             )
-            return f"Training finished successfully. Shutdown scheduled at {shutdown_datetime}."
+            messages.append(f"Shutdown scheduled at {shutdown_datetime}.")
+            return " ".join(messages)
 
-        on_success = shutdown_on_success
+        on_success = complete_training
 
     return start_training(
         command,

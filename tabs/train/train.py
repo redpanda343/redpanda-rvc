@@ -902,7 +902,8 @@ def train_tab():
             message = state.get("message", "Training is idle.")
             is_running = status == "running"
             is_paused = status == "paused"
-            is_active = status in {"running", "paused", "stopping"}
+            is_active = status in {"running", "paused", "stopping", "finalizing"}
+            can_stop = status in {"running", "paused", "stopping"}
 
             if status == "idle":
                 display_message = "Training is idle"
@@ -919,7 +920,7 @@ def train_tab():
                 gr.update(visible=not is_active),
                 gr.update(visible=is_running),
                 gr.update(visible=is_paused),
-                gr.update(visible=is_active),
+                gr.update(visible=can_stop),
                 display_message,
             )
 
