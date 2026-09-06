@@ -1,4 +1,7 @@
+import json
 import os
+import tempfile
+import threading
 from multiprocessing import cpu_count
 
 import gradio as gr
@@ -18,9 +21,12 @@ from tabs.train.train import (
 )
 
 i18n = I18nAuto()
+now_dir = os.getcwd()
+custom_presets_path = os.path.join(now_dir, "logs", "one_click_train_presets.json")
+custom_presets_lock = threading.RLock()
 
 
-TRAINING_PRESETS = {
+DEFAULT_TRAINING_PRESETS = {
     "32k hifigan,cvec": {
         "sampling_rate": "32000",
         "batch_size": 8,
@@ -37,6 +43,17 @@ TRAINING_PRESETS = {
         "cache_dataset_in_gpu": False,
         "checkpointing": False,
         "index_algorithm": "Auto",
+        "chunk_len": 3.0,
+        "overlap_len": 0.3,
+        "truncate_silence_enabled": True,
+        "truncate_silence_threshold_db": -45,
+        "truncate_silence_minimum_seconds": 0.3,
+        "truncate_silence_to_seconds": 0.3,
+        "g_pretrained_path": None,
+        "d_pretrained_path": None,
+        "cpu_cores": max(1, min(cpu_count() // 2, 32)),
+        "gpu": str(get_number_of_gpus()),
+        "cleanup": False,
     },
     "32k From scratch": {
         "sampling_rate": "32000",
@@ -54,8 +71,45 @@ TRAINING_PRESETS = {
         "cache_dataset_in_gpu": False,
         "checkpointing": False,
         "index_algorithm": "Auto",
+        "chunk_len": 3.0,
+        "overlap_len": 0.3,
+        "truncate_silence_enabled": True,
+        "truncate_silence_threshold_db": -45,
+        "truncate_silence_minimum_seconds": 0.3,
+        "truncate_silence_to_seconds": 0.3,
+        "g_pretrained_path": None,
+        "d_pretrained_path": None,
+        "cpu_cores": max(1, min(cpu_count() // 2, 32)),
+        "gpu": str(get_number_of_gpus()),
+        "cleanup": False,
     },
 }
+
+
+def _load_custom_presets():
+    try:
+        with open(custom_presets_path, "r", encoding="utf-8") as presets_file:
+            presets = json.load(presets_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(presets, dict):
+        return {}
+    required_fields = set(next(iter(DEFAULT_TRAINING_PRESETS.values())))
+    return {
+        name: settings
+        for name, settings in presets.items()
+        if isinstance(name, str)
+        and name.strip()
+        and isinstance(settings, dict)
+        and required_fields.issubset(settings)
+        and name not in DEFAULT_TRAINING_PRESETS
+    }
+
+
+TRAINING_PRESETS = {
+    name: settings.copy() for name, settings in DEFAULT_TRAINING_PRESETS.items()
+}
+TRAINING_PRESETS.update(_load_custom_presets())
 
 
 def _failed(message):
@@ -80,10 +134,124 @@ def _apply_preset(preset_name):
         preset["cache_dataset_in_gpu"],
         preset["checkpointing"],
         preset["index_algorithm"],
+        preset["chunk_len"],
+        preset["overlap_len"],
+        preset["truncate_silence_enabled"],
+        preset["truncate_silence_threshold_db"],
+        preset["truncate_silence_minimum_seconds"],
+        preset["truncate_silence_to_seconds"],
+        preset["g_pretrained_path"],
+        preset["d_pretrained_path"],
+        preset["cpu_cores"],
+        preset["gpu"],
+        preset["cleanup"],
         gr.update(visible=preset["cut_preprocess"] == "Simple"),
-        gr.update(visible=False),
+        gr.update(
+            visible=preset["cut_preprocess"] == "Simple"
+            and preset["truncate_silence_enabled"]
+        ),
         gr.update(visible=preset["pretrained_mode"] == "Custom pretrained"),
     )
+
+
+def _save_custom_preset(
+    preset_name,
+    sampling_rate,
+    batch_size,
+    total_epoch,
+    save_every_epoch,
+    cut_preprocess,
+    normalization_mode,
+    dataset_format,
+    process_effects,
+    f0_method,
+    embedder_model,
+    include_mutes,
+    pretrained_mode,
+    cache_dataset_in_gpu,
+    checkpointing,
+    index_algorithm,
+    chunk_len,
+    overlap_len,
+    truncate_silence_enabled,
+    truncate_silence_threshold_db,
+    truncate_silence_minimum_seconds,
+    truncate_silence_to_seconds,
+    g_pretrained_path,
+    d_pretrained_path,
+    cpu_cores,
+    gpu,
+    cleanup,
+):
+    preset_name = str(preset_name or "").strip()
+    if not preset_name:
+        message = "Enter a name for the custom preset."
+        gr.Warning(message)
+        return gr.update(), preset_name
+    if preset_name in DEFAULT_TRAINING_PRESETS:
+        message = "Choose a different name. Default presets cannot be replaced."
+        gr.Warning(message)
+        return gr.update(), preset_name
+
+    settings = {
+        "sampling_rate": str(sampling_rate),
+        "batch_size": int(batch_size),
+        "total_epoch": int(total_epoch),
+        "save_every_epoch": int(save_every_epoch),
+        "cut_preprocess": cut_preprocess,
+        "normalization_mode": normalization_mode,
+        "dataset_format": dataset_format,
+        "process_effects": bool(process_effects),
+        "f0_method": f0_method,
+        "embedder_model": embedder_model,
+        "include_mutes": int(include_mutes),
+        "pretrained_mode": pretrained_mode,
+        "cache_dataset_in_gpu": bool(cache_dataset_in_gpu),
+        "checkpointing": bool(checkpointing),
+        "index_algorithm": index_algorithm,
+        "chunk_len": float(chunk_len),
+        "overlap_len": float(overlap_len),
+        "truncate_silence_enabled": bool(truncate_silence_enabled),
+        "truncate_silence_threshold_db": float(truncate_silence_threshold_db),
+        "truncate_silence_minimum_seconds": float(
+            truncate_silence_minimum_seconds
+        ),
+        "truncate_silence_to_seconds": float(truncate_silence_to_seconds),
+        "g_pretrained_path": g_pretrained_path or None,
+        "d_pretrained_path": d_pretrained_path or None,
+        "cpu_cores": int(cpu_cores),
+        "gpu": str(gpu),
+        "cleanup": bool(cleanup),
+    }
+
+    with custom_presets_lock:
+        custom_presets = {
+            name: preset
+            for name, preset in TRAINING_PRESETS.items()
+            if name not in DEFAULT_TRAINING_PRESETS
+        }
+        custom_presets[preset_name] = settings
+        os.makedirs(os.path.dirname(custom_presets_path), exist_ok=True)
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".one_click_train_presets.",
+            suffix=".tmp",
+            dir=os.path.dirname(custom_presets_path),
+            text=True,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as presets_file:
+                json.dump(custom_presets, presets_file, indent=4)
+            os.replace(temporary_path, custom_presets_path)
+        except Exception:
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+            raise
+        TRAINING_PRESETS[preset_name] = settings
+
+    gr.Info(f"Preset '{preset_name}' saved.")
+    return gr.update(choices=list(TRAINING_PRESETS), value=preset_name), ""
 
 
 def _simple_settings_visibility(cut_preprocess, truncate_silence_enabled):
@@ -286,6 +454,14 @@ def one_click_train_tab():
             allow_custom_value=True,
             interactive=True,
         )
+    with gr.Row():
+        custom_preset_name = gr.Textbox(
+            label=i18n("New Preset Name"),
+            info=i18n("Adjust the settings below, then save them as a new preset."),
+            placeholder=i18n("Enter a preset name"),
+            interactive=True,
+        )
+        save_custom_preset_button = gr.Button(i18n("Save Custom Preset"))
 
     with gr.Accordion(i18n("Dataset Settings"), open=True):
         with gr.Row():
@@ -499,6 +675,17 @@ def one_click_train_tab():
         cache_dataset_in_gpu,
         checkpointing,
         index_algorithm,
+        chunk_len,
+        overlap_len,
+        truncate_silence_enabled,
+        truncate_silence_threshold_db,
+        truncate_silence_minimum_seconds,
+        truncate_silence_to_seconds,
+        g_pretrained_path,
+        d_pretrained_path,
+        cpu_cores,
+        gpu,
+        cleanup,
         simple_settings,
         truncate_settings,
         custom_pretrained_settings,
@@ -507,6 +694,40 @@ def one_click_train_tab():
         fn=_apply_preset,
         inputs=[preset],
         outputs=preset_outputs,
+        queue=False,
+    )
+    save_custom_preset_button.click(
+        fn=_save_custom_preset,
+        inputs=[
+            custom_preset_name,
+            sampling_rate,
+            batch_size,
+            total_epoch,
+            save_every_epoch,
+            cut_preprocess,
+            normalization_mode,
+            dataset_format,
+            process_effects,
+            f0_method,
+            embedder_model,
+            include_mutes,
+            pretrained_mode,
+            cache_dataset_in_gpu,
+            checkpointing,
+            index_algorithm,
+            chunk_len,
+            overlap_len,
+            truncate_silence_enabled,
+            truncate_silence_threshold_db,
+            truncate_silence_minimum_seconds,
+            truncate_silence_to_seconds,
+            g_pretrained_path,
+            d_pretrained_path,
+            cpu_cores,
+            gpu,
+            cleanup,
+        ],
+        outputs=[preset, custom_preset_name],
         queue=False,
     )
     cut_preprocess.input(
