@@ -1,8 +1,10 @@
 from collections import defaultdict
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio.functional as audio_functional
+from sklearn import metrics
 
 from rvc.lib.algorithm.ecapa_tdnn import load_ecapa_tdnn
 
@@ -27,12 +29,14 @@ def _error_rates(scores, labels):
     return fnrs, fprs, thresholds
 
 
-def _eer(fnrs, fprs, thresholds):
-    index = min(range(len(fnrs)), key=lambda item: abs(fnrs[item] - fprs[item]))
-    return max(fnrs[index], fprs[index]) * 100.0, thresholds[index]
+def _eer(scores, labels):
+    fprs, tprs, thresholds = metrics.roc_curve(labels, scores, pos_label=1)
+    fnrs = 1 - tprs
+    index = np.nanargmin(np.absolute(fnrs - fprs))
+    return max(fprs[index], fnrs[index]) * 100.0, thresholds[index]
 
 
-def _min_dcf(fnrs, fprs, thresholds, p_target=0.01, c_miss=1.0, c_fa=1.0):
+def _min_dcf(fnrs, fprs, thresholds, p_target=0.05, c_miss=1.0, c_fa=1.0):
     costs = [
         c_miss * fnr * p_target + c_fa * fpr * (1.0 - p_target)
         for fnr, fpr in zip(fnrs, fprs)
@@ -166,7 +170,6 @@ class ECAPATimbreValidator:
         }
         result = {
             "mean": float(tensor_scores.mean().item()),
-            "min": float(tensor_scores.min().item()),
             "max": float(tensor_scores.max().item()),
             "speaker_mean": sum(speaker_scores.values()) / len(speaker_scores),
             "speakers": speaker_scores,
@@ -179,8 +182,8 @@ class ECAPATimbreValidator:
 
         labels = [1] * len(scores) + [0] * len(negative_scores)
         trial_scores = scores + negative_scores
+        eer, eer_threshold = _eer(trial_scores, labels)
         fnrs, fprs, thresholds = _error_rates(trial_scores, labels)
-        eer, eer_threshold = _eer(fnrs, fprs, thresholds)
         min_dcf, min_dcf_threshold = _min_dcf(fnrs, fprs, thresholds)
         result.update(
             {

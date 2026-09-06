@@ -674,13 +674,7 @@ def run(
         device (torch.device): The device to use for training (CPU or GPU).
     """
     global global_step
-
-    if rank == 0:
-        writer_eval = SummaryWriter(
-            log_dir=os.path.join(experiment_dir, "eval"), max_queue=1000
-        )
-    else:
-        writer_eval = None
+    writer_eval = None
 
     dist.init_process_group(
         backend="gloo" if sys.platform == "win32" or device.type != "cuda" else "nccl",
@@ -897,6 +891,14 @@ def run(
                 print(e)
                 sys.exit(1)
 
+    if rank == 0:
+        purge_step = global_step + 1 if global_step else 0
+        writer_eval = SummaryWriter(
+            log_dir=os.path.join(experiment_dir, "eval"),
+            purge_step=purge_step,
+            max_queue=1000,
+        )
+
     # Initialize schedulers
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=config.train.lr_decay, last_epoch=epoch_str - 2
@@ -987,6 +989,8 @@ def run(
     finally:
         if inference_exporter is not None:
             inference_exporter.close()
+        if writer_eval is not None:
+            writer_eval.close()
 
 
 def train_and_evaluate(
@@ -1056,7 +1060,9 @@ def train_and_evaluate(
         data_iterator = enumerate(train_loader)
 
     epoch_recorder = EpochRecorder()
-    epoch_metrics = None
+    epoch_loss_sums = torch.zeros(6, device=device, dtype=torch.float32)
+    epoch_batch_count = 0
+    epoch_grad_norms = None
     with tqdm(total=len(train_loader), leave=False) as pbar:
         for epoch_batch_index, (batch_idx, info) in enumerate(data_iterator):
             if device.type == "cuda" and not cache_data_in_gpu:
@@ -1206,21 +1212,28 @@ def train_and_evaluate(
 
             global_step += 1
 
+            epoch_loss_sums.add_(
+                torch.stack(
+                    (
+                        loss_gen_all.detach(),
+                        loss_disc.detach(),
+                        loss_gen.detach(),
+                        loss_fm.detach(),
+                        loss_mel.detach(),
+                        loss_kl.detach(),
+                    )
+                ).float()
+            )
+            epoch_batch_count += 1
+
             if log_grad_norms:
-                epoch_metrics = (
+                epoch_grad_norms = (
                     torch.stack(
                         (
-                            loss_gen_all.detach(),
-                            loss_disc.detach(),
-                            loss_gen.detach(),
-                            loss_fm.detach(),
-                            loss_mel.detach(),
-                            loss_kl.detach(),
                             grad_norm_d,
                             grad_norm_g,
                         )
-                    ).float(),
-                    optim_g.param_groups[0]["lr"],
+                    ).float()
                 )
             if (
                 inference_exporter is not None
@@ -1250,59 +1263,69 @@ def train_and_evaluate(
         # end of batch train
     # end of tqdm
 
+    epoch_loss_totals = torch.cat(
+        (epoch_loss_sums, epoch_loss_sums.new_tensor([epoch_batch_count]))
+    )
+    if dist.get_world_size() > 1:
+        if dist.get_backend() == "gloo" and epoch_loss_totals.is_cuda:
+            epoch_loss_totals = epoch_loss_totals.cpu()
+        dist.reduce(epoch_loss_totals, dst=0, op=dist.ReduceOp.SUM)
+
     # Logging and checkpointing
     if rank == 0:
-        # used for tensorboard chart - all/mel
-        mel = spec_to_mel_torch(
-            spec,
-            config.data.filter_length,
-            config.data.n_mel_channels,
-            config.data.sample_rate,
-            config.data.mel_fmin,
-            config.data.mel_fmax,
-        )
-        # used for tensorboard chart - slice/mel_org
-        if randomized:
-            y_mel = commons.slice_segments(
-                mel,
-                ids_slice,
-                config.train.segment_size // config.data.hop_length,
-                dim=3,
-            )
-        else:
-            y_mel = mel
-        # used for tensorboard chart - slice/mel_gen
-        y_hat_mel = mel_spectrogram_torch(
-            y_hat.float().squeeze(1),
-            config.data.filter_length,
-            config.data.n_mel_channels,
-            config.data.sample_rate,
-            config.data.hop_length,
-            config.data.win_length,
-            config.data.mel_fmin,
-            config.data.mel_fmax,
-        )
-
-        epoch_values = epoch_metrics[0].cpu().tolist()
+        epoch_values = (
+            epoch_loss_totals[:-1] / epoch_loss_totals[-1]
+        ).cpu().tolist()
+        gradient_values = epoch_grad_norms.cpu().tolist()
         scalar_dict = {
             "loss/g/total": epoch_values[0],
             "loss/d/adv": epoch_values[1],
-            "learning_rate": epoch_metrics[1],
+            "learning_rate": optim_g.param_groups[0]["lr"],
             "loss/g/adv": epoch_values[2],
             "loss/g/fm": epoch_values[3],
             "loss/g/mel": epoch_values[4],
             "loss/g/kl": epoch_values[5],
-            "grad/norm_d": epoch_values[6],
-            "grad/norm_g": epoch_values[7],
-        }
-
-        image_dict = {
-            "slice/mel_org": plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
-            "slice/mel_gen": plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()),
-            "all/mel": plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
+            "grad/norm_d": gradient_values[0],
+            "grad/norm_g": gradient_values[1],
         }
 
         if epoch % save_every_epoch == 0:
+            mel = spec_to_mel_torch(
+                spec,
+                config.data.filter_length,
+                config.data.n_mel_channels,
+                config.data.sample_rate,
+                config.data.mel_fmin,
+                config.data.mel_fmax,
+            )
+            if randomized:
+                y_mel = commons.slice_segments(
+                    mel,
+                    ids_slice,
+                    config.train.segment_size // config.data.hop_length,
+                    dim=3,
+                )
+            else:
+                y_mel = mel
+            y_hat_mel = mel_spectrogram_torch(
+                y_hat.float().squeeze(1),
+                config.data.filter_length,
+                config.data.n_mel_channels,
+                config.data.sample_rate,
+                config.data.hop_length,
+                config.data.win_length,
+                config.data.mel_fmin,
+                config.data.mel_fmax,
+            )
+            image_dict = {
+                "slice/mel_org": plot_spectrogram_to_numpy(
+                    y_mel[0].data.cpu().numpy()
+                ),
+                "slice/mel_gen": plot_spectrogram_to_numpy(
+                    y_hat_mel[0].data.cpu().numpy()
+                ),
+                "all/mel": plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
+            }
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             inference_model = net_g.module if hasattr(net_g, "module") else net_g
@@ -1345,7 +1368,9 @@ def train_and_evaluate(
                     if timbre_scores["multi_speaker"]:
                         scalar_dict.update(
                             {
-                                "validation/ecapa_cosine_mean": timbre_scores["mean"],
+                                "validation/ecapa_cosine_mean": timbre_scores[
+                                    "speaker_mean"
+                                ],
                                 "validation/ecapa_margin_mean": timbre_scores[
                                     "margin_mean"
                                 ],
@@ -1355,15 +1380,13 @@ def train_and_evaluate(
                                 "validation/ecapa_eer_percent": timbre_scores[
                                     "eer_percent"
                                 ],
+                                "validation/ecapa_min_dcf": timbre_scores["min_dcf"],
                             }
                         )
                     else:
-                        scalar_dict.update(
-                            {
-                                "validation/ecapa_cosine_mean": timbre_scores["mean"],
-                                "validation/ecapa_cosine_min": timbre_scores["min"],
-                            }
-                        )
+                        scalar_dict["validation/ecapa_cosine_mean"] = timbre_scores[
+                            "speaker_mean"
+                        ]
                 except Exception as error:
                     print(f"ECAPA timbre validation failed: {error}")
             audio_dict = {}
@@ -1381,7 +1404,6 @@ def train_and_evaluate(
             summarize(
                 writer=writer,
                 global_step=global_step,
-                images=image_dict,
                 scalars=scalar_dict,
             )
         writer.flush()
