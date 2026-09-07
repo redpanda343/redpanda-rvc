@@ -26,6 +26,7 @@ sys.path.append(now_directory)
 import logging
 
 from rvc.train.preprocess.slicer import (
+    FIRERED_GPU_BATCH_SIZE,
     Slicer,
     fireredvad_cuda_available,
     shutdown_fireredvad_gpu,
@@ -44,6 +45,7 @@ HIGH_PASS_CUTOFF = 20
 SAMPLE_RATE_16K = 16000
 AUTOMATIC_VAD_BLOCK_SECONDS = 180.0
 AUTOMATIC_VAD_CONTEXT_SECONDS = 2.0
+AUTOMATIC_VAD_MAX_BATCH_BLOCKS = 16
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
 SUPPORTED_DATASET_FORMATS = {"wav", "flac"}
@@ -538,14 +540,61 @@ class PreProcess:
             )
         return audio
 
+    @staticmethod
+    def _automatic_block_result(
+        analysis, analysis_start, core_start, core_end, detected_intervals
+    ):
+        intervals = []
+        voice_peak = 0.0
+        for start_s, end_s in detected_intervals:
+            start_sample = int(round(start_s * SAMPLE_RATE_16K))
+            end_sample = int(round(end_s * SAMPLE_RATE_16K))
+            if end_sample <= core_start or start_sample >= core_end:
+                continue
+            voice_start = max(start_sample, core_start)
+            voice_end = min(end_sample, core_end)
+            if voice_end > voice_start:
+                voice_peak = max(
+                    voice_peak,
+                    float(np.max(np.abs(analysis[voice_start:voice_end]))),
+                )
+            intervals.append(
+                (
+                    (analysis_start + start_sample) / SAMPLE_RATE_16K,
+                    (analysis_start + end_sample) / SAMPLE_RATE_16K,
+                )
+            )
+        return intervals, voice_peak
+
     def _detect_automatic_intervals(self, path: str):
         context_samples = int(round(SAMPLE_RATE_16K * AUTOMATIC_VAD_CONTEXT_SECONDS))
+        batch_blocks = (
+            max(1, min(FIRERED_GPU_BATCH_SIZE, AUTOMATIC_VAD_MAX_BATCH_BLOCKS))
+            if self.slicer.use_gpu
+            else 1
+        )
+        pending = []
         intervals = []
         previous = None
         previous_start = 0
         past_context = np.empty(0, dtype=np.float32)
         total_samples = 0
         voice_peak = 0.0
+
+        def flush_pending():
+            nonlocal voice_peak
+            if not pending:
+                return
+            detected_groups = self.slicer.detect_voice_intervals_batch_16k(
+                [item[0] for item in pending]
+            )
+            for item, detected in zip(pending, detected_groups):
+                block_intervals, block_peak = self._automatic_block_result(
+                    item[0], item[1], item[2], item[3], detected
+                )
+                intervals.extend(block_intervals)
+                voice_peak = max(voice_peak, block_peak)
+            pending.clear()
 
         for current in iter_audio_ffmpeg(
             path, SAMPLE_RATE_16K, AUTOMATIC_VAD_BLOCK_SECONDS
@@ -561,25 +610,9 @@ class PreProcess:
             analysis_start = previous_start - len(past_context)
             core_start = len(past_context)
             core_end = core_start + len(previous)
-
-            for start_s, end_s in self.slicer.detect_voice_intervals_16k(analysis):
-                start_sample = int(round(start_s * SAMPLE_RATE_16K))
-                end_sample = int(round(end_s * SAMPLE_RATE_16K))
-                if end_sample <= core_start or start_sample >= core_end:
-                    continue
-                voice_start = max(start_sample, core_start)
-                voice_end = min(end_sample, core_end)
-                if voice_end > voice_start:
-                    voice_peak = max(
-                        voice_peak,
-                        float(np.max(np.abs(analysis[voice_start:voice_end]))),
-                    )
-                intervals.append(
-                    (
-                        (analysis_start + start_sample) / SAMPLE_RATE_16K,
-                        (analysis_start + end_sample) / SAMPLE_RATE_16K,
-                    )
-                )
+            pending.append((analysis, analysis_start, core_start, core_end))
+            if len(pending) >= batch_blocks:
+                flush_pending()
 
             past_context = previous[-context_samples:].copy()
             previous_start += len(previous)
@@ -595,24 +628,8 @@ class PreProcess:
             analysis_start = previous_start - len(past_context)
             core_start = len(past_context)
             core_end = core_start + len(previous)
-            for start_s, end_s in self.slicer.detect_voice_intervals_16k(analysis):
-                start_sample = int(round(start_s * SAMPLE_RATE_16K))
-                end_sample = int(round(end_s * SAMPLE_RATE_16K))
-                if end_sample <= core_start or start_sample >= core_end:
-                    continue
-                voice_start = max(start_sample, core_start)
-                voice_end = min(end_sample, core_end)
-                if voice_end > voice_start:
-                    voice_peak = max(
-                        voice_peak,
-                        float(np.max(np.abs(analysis[voice_start:voice_end]))),
-                    )
-                intervals.append(
-                    (
-                        (analysis_start + start_sample) / SAMPLE_RATE_16K,
-                        (analysis_start + end_sample) / SAMPLE_RATE_16K,
-                    )
-                )
+            pending.append((analysis, analysis_start, core_start, core_end))
+        flush_pending()
 
         duration_s = total_samples / SAMPLE_RATE_16K
         return (

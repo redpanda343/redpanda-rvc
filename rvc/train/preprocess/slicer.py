@@ -425,6 +425,54 @@ class Slicer:
         intervals.extend(events.get("singing", ()))
         return intervals
 
+    def detect_voice_intervals_batch_16k(self, waveforms):
+        if not self.use_gpu or len(waveforms) < 2:
+            return [self.detect_voice_intervals_16k(waveform) for waveform in waveforms]
+
+        detector_audios = []
+        audio_indices = []
+        results = [[] for _ in waveforms]
+        minimum_samples = int(FIRERED_SAMPLE_RATE * 0.025)
+        for index, waveform in enumerate(waveforms):
+            samples = np.asarray(waveform, dtype=np.float32)
+            if samples.ndim > 1:
+                samples = samples.mean(axis=0)
+            if samples.size < minimum_samples:
+                continue
+            detector_audios.append(
+                np.rint(np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+            )
+            audio_indices.append(index)
+
+        if not detector_audios:
+            return results
+
+        worker_count = min(FIRERED_LONG_AUDIO_WORKERS, len(detector_audios))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            feature_groups = list(executor.map(_extract_aed_features, detector_audios))
+
+        aed = _get_aed_model(True)
+        batcher = _get_gpu_batcher()
+        pending = []
+        for features, duration in feature_groups:
+            futures = [
+                batcher.submit(chunk)
+                for chunk in features.split(aed.config.chunk_max_frame, dim=0)
+            ]
+            pending.append((futures, duration))
+
+        import torch
+
+        for index, (futures, duration) in zip(audio_indices, pending):
+            probs = [future.result() for future in futures]
+            if not probs:
+                continue
+            events = _postprocess_aed_probs(aed, torch.cat(probs, dim=0), duration)
+            intervals = list(events.get("speech", ()))
+            intervals.extend(events.get("singing", ()))
+            results[index] = intervals
+        return results
+
     def slice(self, waveform: np.ndarray):
         waveform = np.asarray(waveform)
         sample_count = waveform.shape[-1] if waveform.ndim > 1 else waveform.shape[0]
