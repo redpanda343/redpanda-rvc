@@ -146,16 +146,29 @@ def _postprocess_aed_probs(aed, probs, duration):
     return events
 
 
+def _gpu_batch_size(free_memory):
+    memory_per_item = 320 * 1024**2
+    memory_budget = min(int(free_memory * 0.4), free_memory - 1024**3)
+    candidate = max(1, min(16, memory_budget // memory_per_item))
+    batch_size = max(size for size in (1, 2, 4, 8, 16) if size <= candidate)
+    return batch_size
+
+
 class _GpuAedBatcher:
     def __init__(self, aed):
         import torch
 
         free_memory, _ = torch.cuda.mem_get_info()
-        self.batch_size = 2 if free_memory >= 2 * 1024**3 else 1
+        device_name = torch.cuda.get_device_name()
+        self.batch_size = _gpu_batch_size(free_memory)
         self.aed = aed
         self.requests = queue.Queue()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        print(
+            f"FireRedVAD CUDA device: {device_name}, precision: FP32, "
+            f"batch size: {self.batch_size}"
+        )
 
     def submit(self, features):
         future = Future()
