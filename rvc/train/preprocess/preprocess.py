@@ -25,7 +25,11 @@ sys.path.append(now_directory)
 
 import logging
 
-from rvc.train.preprocess.slicer import Slicer
+from rvc.train.preprocess.slicer import (
+    Slicer,
+    fireredvad_cuda_available,
+    shutdown_fireredvad_gpu,
+)
 
 logging.getLogger("numba.core.byteflow").setLevel(logging.WARNING)
 logging.getLogger("numba.core.ssa").setLevel(logging.WARNING)
@@ -331,9 +335,16 @@ def iter_audio_ffmpeg(file: str, sample_rate: int, block_seconds: float):
 
 
 class PreProcess:
-    def __init__(self, sr: int, exp_dir: str, dataset_format: str = "wav"):
+    def __init__(
+        self,
+        sr: int,
+        exp_dir: str,
+        dataset_format: str = "wav",
+        use_fireredvad_gpu: bool = False,
+    ):
         self.slicer = Slicer(
             sr=sr,
+            use_gpu=use_fireredvad_gpu,
             threshold=-42,
             min_length=1500,
             min_interval=400,
@@ -345,7 +356,6 @@ class PreProcess:
             N=5, Wn=HIGH_PASS_CUTOFF, btype="high", fs=self.sr
         )
         self.exp_dir = exp_dir
-        self.device = "cpu"
         self.dataset_format = normalize_dataset_format(dataset_format)
         self.gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
         self.wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
@@ -885,7 +895,7 @@ def preprocess_training_set(
         sys.exit(1)
     start_time = time.time()
     dataset_format = normalize_dataset_format(dataset_format)
-    print(f"Starting preprocess with {num_processes} processes...")
+    print(f"Starting preprocess with {num_processes} workers...")
 
     files = []
     idx = 0
@@ -914,7 +924,13 @@ def preprocess_training_set(
         clear_simple_preprocess_artifacts(exp_dir)
     elif dataset_format == "flac":
         clear_flac_preprocess_artifacts(exp_dir)
-    pp = PreProcess(sr, exp_dir, dataset_format)
+    uses_fireredvad = cut_preprocess == "Automatic" or normalization_mode == "post"
+    use_fireredvad_gpu = uses_fireredvad and fireredvad_cuda_available()
+    if use_fireredvad_gpu:
+        print("FireRedVAD inference: CUDA")
+    elif uses_fireredvad:
+        print("FireRedVAD inference: CPU")
+    pp = PreProcess(sr, exp_dir, dataset_format, use_fireredvad_gpu)
 
     audio_length = []
     if cut_preprocess == "Simple":
@@ -958,16 +974,23 @@ def preprocess_training_set(
         ]
         worker = process_audio_wrapper
 
-    with tqdm(total=len(work_items)) as pbar:
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=num_processes
-        ) as executor:
-            futures = [
-                executor.submit(worker, work_item) for work_item in work_items
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                audio_length.append(future.result())
-                pbar.update(1)
+    executor_class = (
+        concurrent.futures.ThreadPoolExecutor
+        if use_fireredvad_gpu
+        else concurrent.futures.ProcessPoolExecutor
+    )
+    try:
+        with tqdm(total=len(work_items)) as pbar:
+            with executor_class(max_workers=num_processes) as executor:
+                futures = [
+                    executor.submit(worker, work_item) for work_item in work_items
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    audio_length.append(future.result())
+                    pbar.update(1)
+    finally:
+        if use_fireredvad_gpu:
+            shutdown_fireredvad_gpu()
 
     audio_length = sum(audio_length)
     save_dataset_duration(
