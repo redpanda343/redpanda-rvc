@@ -34,7 +34,12 @@ from rvc.lib.utils import load_audio_infer, load_embedding
 from rvc.lib.tools.split_audio import process_audio, merge_audio
 from rvc.lib.algorithm.synthesizers import Synthesizer
 from rvc.configs.config import Config
-from rvc.train.preprocess.slicer import FIRERED_SAMPLE_RATE, Slicer
+from rvc.train.preprocess.slicer import (
+    FIRERED_LONG_AUDIO_SECONDS,
+    FIRERED_SAMPLE_RATE,
+    Slicer,
+    fireredvad_cuda_available,
+)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -282,9 +287,14 @@ class VoiceConverter:
         if output_peak == 0:
             return audio
 
-        slicer = Slicer(FIRERED_SAMPLE_RATE)
-        intervals = slicer.detect_voice_intervals_16k(source_audio)
         duration = source_audio.shape[-1] / FIRERED_SAMPLE_RATE
+        use_fireredvad_gpu = (
+            duration > FIRERED_LONG_AUDIO_SECONDS and fireredvad_cuda_available()
+        )
+        if use_fireredvad_gpu:
+            print("Long audio detected. FireRedVAD normalization inference: CUDA")
+        slicer = Slicer(FIRERED_SAMPLE_RATE, use_gpu=use_fireredvad_gpu)
+        intervals = slicer.detect_voice_intervals_16k(source_audio)
         intervals = slicer.merge_voice_intervals(intervals, duration)
 
         voice_peak = 0.0

@@ -5,13 +5,18 @@ import os
 import queue
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from scipy.signal import resample_poly
 
 FIRERED_SAMPLE_RATE = 16000
+FIRERED_FRAME_LENGTH_SAMPLES = 400
+FIRERED_FRAME_SHIFT_SAMPLES = 160
+FIRERED_LONG_AUDIO_SECONDS = 3600.0
+FIRERED_LONG_AUDIO_BLOCK_SECONDS = 180.0
+FIRERED_LONG_AUDIO_WORKERS = 4
 FIRERED_MODEL_DIR = (
     Path(__file__).resolve().parents[3]
     / "rvc"
@@ -134,6 +139,34 @@ def _get_thread_audio_feat():
         audio_feat = AudioFeat(str(FIRERED_MODEL_DIR / "cmvn.ark"))
         _AED_THREAD_LOCAL.audio_feat = audio_feat
     return audio_feat
+
+
+def _extract_aed_features(detector_audio, parallel=False):
+    duration = detector_audio.shape[0] / FIRERED_SAMPLE_RATE
+    if not parallel:
+        audio_feat = _get_thread_audio_feat()
+        features, _ = audio_feat.extract(detector_audio)
+        return features, duration
+
+    block_samples = int(FIRERED_SAMPLE_RATE * FIRERED_LONG_AUDIO_BLOCK_SECONDS)
+    right_context = FIRERED_FRAME_LENGTH_SAMPLES - FIRERED_FRAME_SHIFT_SAMPLES
+    ranges = [
+        (start, min(detector_audio.shape[0], start + block_samples + right_context))
+        for start in range(0, detector_audio.shape[0], block_samples)
+    ]
+
+    def extract(bounds):
+        start, end = bounds
+        features, _ = _get_thread_audio_feat().extract(detector_audio[start:end])
+        return features
+
+    worker_count = min(FIRERED_LONG_AUDIO_WORKERS, len(ranges))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        feature_blocks = list(executor.map(extract, ranges))
+
+    import torch
+
+    return torch.cat(feature_blocks, dim=0), duration
 
 
 def _postprocess_aed_probs(aed, probs, duration):
@@ -359,10 +392,20 @@ class Slicer:
         detector_audio = np.rint(
             np.clip(samples, -1.0, 1.0) * 32767.0
         ).astype(np.int16)
+        duration = detector_audio.shape[0] / FIRERED_SAMPLE_RATE
+        long_audio = duration > FIRERED_LONG_AUDIO_SECONDS
+        if long_audio:
+            print(
+                f"Long audio detected. FireRedVAD feature extraction: "
+                f"{FIRERED_LONG_AUDIO_WORKERS} workers"
+            )
+
+        if self.use_gpu or long_audio:
+            aed = _get_aed_model(self.use_gpu)
+            features, duration = _extract_aed_features(
+                detector_audio, parallel=long_audio
+            )
         if self.use_gpu:
-            aed = _get_aed_model(True)
-            audio_feat = _get_thread_audio_feat()
-            features, duration = audio_feat.extract(detector_audio)
             batcher = _get_gpu_batcher()
             futures = [
                 batcher.submit(chunk)
@@ -373,6 +416,15 @@ class Slicer:
                 return []
             import torch
 
+            events = _postprocess_aed_probs(aed, torch.cat(probs, dim=0), duration)
+        elif long_audio:
+            import torch
+
+            with torch.inference_mode():
+                probs = []
+                for chunk in features.split(aed.config.chunk_max_frame, dim=0):
+                    chunk_probs, _ = aed.model.forward(chunk.unsqueeze(0))
+                    probs.append(chunk_probs.squeeze(0).cpu())
             events = _postprocess_aed_probs(aed, torch.cat(probs, dim=0), duration)
         else:
             aed = _get_aed_model()
