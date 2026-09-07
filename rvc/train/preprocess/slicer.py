@@ -148,9 +148,10 @@ def _postprocess_aed_probs(aed, probs, duration):
 
 def _gpu_batch_size(free_memory):
     memory_per_item = 320 * 1024**2
-    memory_budget = min(int(free_memory * 0.4), free_memory - 1024**3)
-    candidate = max(1, min(16, memory_budget // memory_per_item))
-    batch_size = max(size for size in (1, 2, 4, 8, 16) if size <= candidate)
+    memory_reserve = max(1024**3, int(free_memory * 0.15))
+    memory_budget = max(memory_per_item, free_memory - memory_reserve)
+    candidate = max(1, min(32, memory_budget // memory_per_item))
+    batch_size = max(size for size in (1, 2, 4, 8, 16, 32) if size <= candidate)
     return batch_size
 
 
@@ -175,12 +176,44 @@ class _GpuAedBatcher:
         self.requests.put((features, future))
         return future
 
-    def _run_batch(self, requests):
+    def _forward_batch(self, requests):
         import torch
 
         features = torch.stack([item[0] for item in requests]).cuda()
         probs, _ = self.aed.model.forward(features)
-        probs = probs.cpu()
+        return probs.cpu()
+
+    def _try_forward_batch(self, requests):
+        import torch
+
+        try:
+            return self._forward_batch(requests)
+        except torch.cuda.OutOfMemoryError:
+            return None
+
+    def _run_batch(self, requests):
+        import torch
+
+        if len(requests) > self.batch_size:
+            for start in range(0, len(requests), self.batch_size):
+                self._run_batch(requests[start : start + self.batch_size])
+            return
+        probs = self._try_forward_batch(requests)
+        if probs is None:
+            if len(requests) == 1:
+                raise torch.cuda.OutOfMemoryError(
+                    "FireRedVAD CUDA inference ran out of memory at batch size 1"
+                )
+            reduced_size = max(1, len(requests) // 2)
+            self.batch_size = min(self.batch_size, reduced_size)
+            torch.cuda.empty_cache()
+            print(
+                f"FireRedVAD CUDA batch reduced to {self.batch_size} after OOM"
+            )
+            midpoint = len(requests) // 2
+            self._run_batch(requests[:midpoint])
+            self._run_batch(requests[midpoint:])
+            return
         for index, (_, future) in enumerate(requests):
             future.set_result(probs[index].clone())
 
