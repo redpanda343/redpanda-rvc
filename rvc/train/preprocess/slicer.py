@@ -17,7 +17,7 @@ FIRERED_FRAME_SHIFT_SAMPLES = 160
 FIRERED_LONG_AUDIO_SECONDS = 3600.0
 FIRERED_LONG_AUDIO_BLOCK_SECONDS = 180.0
 FIRERED_LONG_AUDIO_WORKERS = 4
-FIRERED_GPU_BATCH_MULTIPLIER = 3
+FIRERED_GPU_BATCH_SIZE = 128
 FIRERED_MODEL_DIR = (
     Path(__file__).resolve().parents[3]
     / "rvc"
@@ -180,22 +180,12 @@ def _postprocess_aed_probs(aed, probs, duration):
     return events
 
 
-def _gpu_batch_size(free_memory):
-    memory_per_item = 320 * 1024**2
-    memory_reserve = max(1024**3, int(free_memory * 0.15))
-    memory_budget = max(memory_per_item, free_memory - memory_reserve)
-    candidate = max(1, min(32, memory_budget // memory_per_item))
-    batch_size = max(size for size in (1, 2, 4, 8, 16, 32) if size <= candidate)
-    return batch_size * FIRERED_GPU_BATCH_MULTIPLIER
-
-
 class _GpuAedBatcher:
     def __init__(self, aed):
         import torch
 
-        free_memory, _ = torch.cuda.mem_get_info()
         device_name = torch.cuda.get_device_name()
-        self.batch_size = _gpu_batch_size(free_memory)
+        self.batch_size = FIRERED_GPU_BATCH_SIZE
         self.aed = aed
         self.requests = queue.Queue()
         self.thread = threading.Thread(target=self._run, daemon=True)
