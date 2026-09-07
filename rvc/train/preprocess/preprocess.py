@@ -49,6 +49,9 @@ AUTOMATIC_VAD_MAX_BATCH_BLOCKS = 16
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
 SUPPORTED_DATASET_FORMATS = {"wav", "flac"}
+AUDIO_WRITE_MAX_WORKERS = 8
+AUDIO_WRITE_PENDING_MULTIPLIER = 2
+FLAC_COMPRESSION_LEVEL = 0.0
 SIMPLE_SILENCE_THRESHOLD_DB = -45.0
 SIMPLE_MIN_SILENCE_SECONDS = 0.3
 SIMPLE_TRUNCATE_TO_SECONDS = 0.3
@@ -89,7 +92,85 @@ def write_training_audio(
         sample_rate,
         format="FLAC",
         subtype="PCM_24",
+        compression_level=FLAC_COMPRESSION_LEVEL,
     )
+
+
+def write_training_audio_pair(
+    gt_wavs_dir: str,
+    wavs16k_dir: str,
+    stem: str,
+    sample_rate: int,
+    audio: np.ndarray,
+    dataset_format: str,
+):
+    write_training_audio(
+        gt_wavs_dir,
+        stem,
+        sample_rate,
+        audio,
+        dataset_format,
+    )
+    audio_16k = librosa.resample(
+        audio,
+        orig_sr=sample_rate,
+        target_sr=SAMPLE_RATE_16K,
+    )
+    write_training_audio(
+        wavs16k_dir,
+        stem,
+        SAMPLE_RATE_16K,
+        audio_16k,
+        dataset_format,
+    )
+
+
+class BoundedAudioWriter:
+    def __init__(self, max_workers: int):
+        self.max_workers = max(1, int(max_workers))
+        self.max_pending = self.max_workers * AUDIO_WRITE_PENDING_MULTIPLIER
+        self.executor = (
+            concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers)
+            if self.max_workers > 1
+            else None
+        )
+        self.pending = set()
+
+    def submit(self, *args):
+        if self.executor is None:
+            write_training_audio_pair(*args)
+            return
+        self.pending.add(self.executor.submit(write_training_audio_pair, *args))
+        if len(self.pending) >= self.max_pending:
+            done, self.pending = concurrent.futures.wait(
+                self.pending,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                future.result()
+
+    def close(self):
+        if self.executor is None:
+            return
+        try:
+            for future in concurrent.futures.as_completed(self.pending):
+                future.result()
+        finally:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+            self.executor = None
+            self.pending.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            self.close()
+        elif self.executor is not None:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+            self.executor = None
+            self.pending.clear()
+        return False
 
 
 def clear_flac_preprocess_artifacts(exp_dir: str):
@@ -336,6 +417,102 @@ def iter_audio_ffmpeg(file: str, sample_rate: int, block_seconds: float):
             process.wait()
 
 
+class FFmpegAudioStreamReader:
+    def __init__(self, file: str, sample_rate: int):
+        self.sample_rate = sample_rate
+        self.buffer = np.empty(0, dtype=np.float32)
+        self.buffer_start = 0
+        command = [
+            _ffmpeg_path(),
+            "-nostdin",
+            "-threads",
+            "0",
+            "-i",
+            _clean_audio_path(file),
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "pipe:1",
+        ]
+        block_bytes = int(sample_rate * AUTOMATIC_DECODE_BLOCK_SECONDS) * 4
+        self.command = command
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=block_bytes,
+        )
+
+    def _read_samples(self, count: int) -> np.ndarray:
+        if count <= 0:
+            return np.empty(0, dtype=np.float32)
+        target_bytes = count * np.dtype(np.float32).itemsize
+        data = bytearray()
+        while len(data) < target_bytes:
+            chunk = self.process.stdout.read(target_bytes - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+        usable = len(data) - (len(data) % np.dtype(np.float32).itemsize)
+        if usable < target_bytes:
+            return_code = self.process.wait()
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, self.command)
+        if usable == 0:
+            return np.empty(0, dtype=np.float32)
+        return np.frombuffer(data[:usable], dtype=np.float32).copy()
+
+    def _discard_to(self, target: int):
+        buffer_end = self.buffer_start + len(self.buffer)
+        if target <= buffer_end:
+            offset = max(0, target - self.buffer_start)
+            self.buffer = self.buffer[offset:]
+            self.buffer_start += offset
+            return
+        self.buffer = np.empty(0, dtype=np.float32)
+        self.buffer_start = buffer_end
+        while self.buffer_start < target:
+            discarded = self._read_samples(target - self.buffer_start)
+            if discarded.size == 0:
+                break
+            self.buffer_start += len(discarded)
+
+    def read_segment(self, start_s: float, end_s: float) -> np.ndarray:
+        start = max(0, int(round(start_s * self.sample_rate)))
+        end = max(start, int(round(end_s * self.sample_rate)))
+        if start < self.buffer_start:
+            raise ValueError("FFmpeg stream segments must be read in start-time order")
+        self._discard_to(start)
+        if self.buffer_start < start:
+            return np.empty(0, dtype=np.float32)
+        required = end - self.buffer_start
+        while len(self.buffer) < required:
+            current = self._read_samples(required - len(self.buffer))
+            if current.size == 0:
+                break
+            self.buffer = np.concatenate((self.buffer, current))
+        return self.buffer[: end - start].copy()
+
+    def close(self):
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+
 class PreProcess:
     def __init__(
         self,
@@ -359,6 +536,7 @@ class PreProcess:
         )
         self.exp_dir = exp_dir
         self.dataset_format = normalize_dataset_format(dataset_format)
+        self.audio_write_workers = 1
         self.gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
         self.wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
         os.makedirs(self.gt_wavs_dir, exist_ok=True)
@@ -402,6 +580,7 @@ class PreProcess:
         idx1: int,
         normalization_mode: str,
         normalization_gain: float = 1.0,
+        writer: BoundedAudioWriter | None = None,
     ):
         if normalized_audio is None:
             print(f"{sid}-{idx0}-{idx1}-filtered")
@@ -410,25 +589,18 @@ class PreProcess:
             normalized_audio = self._peak_normalize_audio(
                 normalized_audio, normalization_gain
             )
-        write_training_audio(
+        args = (
             self.gt_wavs_dir,
+            self.wavs16k_dir,
             f"{sid}_{idx0}_{idx1}",
             self.sr,
             normalized_audio,
             self.dataset_format,
         )
-        audio_16k = librosa.resample(
-            normalized_audio,
-            orig_sr=self.sr,
-            target_sr=SAMPLE_RATE_16K,
-        )
-        write_training_audio(
-            self.wavs16k_dir,
-            f"{sid}_{idx0}_{idx1}",
-            SAMPLE_RATE_16K,
-            audio_16k,
-            self.dataset_format,
-        )
+        if writer is None:
+            write_training_audio_pair(*args)
+        else:
+            writer.submit(*args)
 
     def simple_cut(
         self,
@@ -442,33 +614,22 @@ class PreProcess:
     ):
         chunk_length = int(self.sr * chunk_len)
         overlap_length = int(self.sr * overlap_len)
-        i = 0
-        while i < len(audio):
-            chunk = audio[i : i + chunk_length]
-            if normalization_mode == "post":
-                chunk = self._peak_normalize_audio(chunk, normalization_gain)
-            if len(chunk) == chunk_length:
-                # full SR for training
-                slice_stem = f"{sid}_{idx0}_{i // (chunk_length - overlap_length)}"
-                write_training_audio(
-                    self.gt_wavs_dir,
-                    slice_stem,
-                    self.sr,
-                    chunk,
-                    self.dataset_format,
-                )
-                # 16KHz for feature extraction
-                chunk_16k = librosa.resample(
-                    chunk, orig_sr=self.sr, target_sr=SAMPLE_RATE_16K
-                )
-                write_training_audio(
-                    self.wavs16k_dir,
-                    slice_stem,
-                    SAMPLE_RATE_16K,
-                    chunk_16k,
-                    self.dataset_format,
-                )
-            i += chunk_length - overlap_length
+        with BoundedAudioWriter(self.audio_write_workers) as writer:
+            i = 0
+            while i < len(audio):
+                chunk = audio[i : i + chunk_length]
+                if normalization_mode == "post":
+                    chunk = self._peak_normalize_audio(chunk, normalization_gain)
+                if len(chunk) == chunk_length:
+                    writer.submit(
+                        self.gt_wavs_dir,
+                        self.wavs16k_dir,
+                        f"{sid}_{idx0}_{i // (chunk_length - overlap_length)}",
+                        self.sr,
+                        chunk,
+                        self.dataset_format,
+                    )
+                i += chunk_length - overlap_length
 
     def process_simple_audio(
         self,
@@ -690,46 +851,50 @@ class PreProcess:
         ranges = self._automatic_clip_ranges(intervals)
         normalization_gain = self._post_normalization_gain(voice_peak)
         idx1 = 0
-        for group in self._group_clip_ranges(ranges):
-            batch_start = group[0][0]
-            batch_end = group[-1][1]
-            decode_start = max(0.0, batch_start - AUTOMATIC_PROCESS_CONTEXT_SECONDS)
-            decode_end = min(
-                duration_s, batch_end + AUTOMATIC_PROCESS_CONTEXT_SECONDS
-            )
-            audio = load_audio_ffmpeg_segment(
-                path, self.sr, decode_start, decode_end - decode_start
-            )
-            audio = self._prepare_audio(
-                audio,
-                process_effects,
-                noise_reduction,
-                reduction_strength,
-                normalization_mode,
-            )
-            if audio is None:
-                for _ in group:
-                    print(f"{sid}-{idx0}-{idx1}-filtered")
-                    idx1 += 1
-                continue
-
-            for clip_start, clip_end in group:
-                local_start = max(
-                    0, int(round((clip_start - decode_start) * self.sr))
-                )
-                local_end = min(
-                    len(audio), int(round((clip_end - decode_start) * self.sr))
-                )
-                if local_end > local_start:
-                    self.process_audio_segment(
-                        audio[local_start:local_end],
-                        sid,
-                        idx0,
-                        idx1,
-                        normalization_mode,
-                        normalization_gain,
+        groups = self._group_clip_ranges(ranges)
+        with FFmpegAudioStreamReader(path, self.sr) as reader:
+            with BoundedAudioWriter(self.audio_write_workers) as writer:
+                for group in groups:
+                    batch_start = group[0][0]
+                    batch_end = group[-1][1]
+                    decode_start = max(
+                        0.0, batch_start - AUTOMATIC_PROCESS_CONTEXT_SECONDS
                     )
-                idx1 += 1
+                    decode_end = min(
+                        duration_s, batch_end + AUTOMATIC_PROCESS_CONTEXT_SECONDS
+                    )
+                    audio = reader.read_segment(decode_start, decode_end)
+                    audio = self._prepare_audio(
+                        audio,
+                        process_effects,
+                        noise_reduction,
+                        reduction_strength,
+                        normalization_mode,
+                    )
+                    if audio is None:
+                        for _ in group:
+                            print(f"{sid}-{idx0}-{idx1}-filtered")
+                            idx1 += 1
+                        continue
+
+                    for clip_start, clip_end in group:
+                        local_start = max(
+                            0, int(round((clip_start - decode_start) * self.sr))
+                        )
+                        local_end = min(
+                            len(audio), int(round((clip_end - decode_start) * self.sr))
+                        )
+                        if local_end > local_start:
+                            self.process_audio_segment(
+                                audio[local_start:local_end],
+                                sid,
+                                idx0,
+                                idx1,
+                                normalization_mode,
+                                normalization_gain,
+                                writer,
+                            )
+                        idx1 += 1
         return duration_s
 
     def process_audio(
@@ -991,6 +1156,15 @@ def preprocess_training_set(
         ]
         worker = process_audio_wrapper
 
+    active_workers = max(1, min(num_processes, len(work_items)))
+    pp.audio_write_workers = max(
+        1,
+        min(
+            AUDIO_WRITE_MAX_WORKERS,
+            multiprocessing.cpu_count() // active_workers,
+        ),
+    )
+    print(f"Audio output pipeline: {pp.audio_write_workers} workers per source")
     executor_class = (
         concurrent.futures.ThreadPoolExecutor
         if use_fireredvad_gpu
