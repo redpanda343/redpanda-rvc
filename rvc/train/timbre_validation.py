@@ -50,13 +50,44 @@ class ECAPATimbreValidator:
     sample_rate = 16000
     segment_samples = 300 * 160 + 240
     segment_count = 5
+    cpu_segment_batch_size = 20
+    cuda_segment_batch_size = 10
+    cuda_memory_headroom = 512 * 1024 * 1024
 
     def __init__(self, model_path):
         self.model = load_ecapa_tdnn(model_path, device="cpu")
+        self.device = torch.device("cpu")
         self.references = {}
 
+    def to(self, device):
+        device = torch.device(device)
+        self.model.to(device)
+        self.references = {
+            speaker_id: (full.to(device), segments.to(device))
+            for speaker_id, (full, segments) in self.references.items()
+        }
+        self.device = device
+        return self
+
+    def preferred_device(self, device):
+        device = torch.device(device)
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return torch.device("cpu")
+        try:
+            free_memory, _ = torch.cuda.mem_get_info(device)
+            reusable_memory = max(
+                0,
+                torch.cuda.memory_reserved(device)
+                - torch.cuda.memory_allocated(device),
+            )
+            if free_memory + reusable_memory >= self.cuda_memory_headroom:
+                return device
+        except RuntimeError:
+            pass
+        return torch.device("cpu")
+
     def _prepare_audio(self, audio, sample_rate):
-        audio = audio.detach().to(device="cpu", dtype=torch.float32)
+        audio = audio.detach().to(device=self.device, dtype=torch.float32)
         while audio.dim() > 1:
             audio = audio.mean(dim=0)
         if audio.numel() < 2:
@@ -83,6 +114,43 @@ class ECAPATimbreValidator:
         audio = self._prepare_audio(audio, sample_rate)
         full = F.normalize(self.model(audio.unsqueeze(0), aug=False), p=2, dim=1)
         segments = F.normalize(self.model(self._segments(audio), aug=False), p=2, dim=1)
+        return full, segments
+
+    @torch.inference_mode()
+    def batch_embeddings(self, audio, lengths, sample_rate):
+        audio = audio.detach().to(device=self.device, dtype=torch.float32)
+        length_values = lengths.detach().cpu().tolist()
+        prepared = [
+            self._prepare_audio(audio[index, :, : int(length_values[index])], sample_rate)
+            for index in range(audio.size(0))
+        ]
+        full = torch.cat(
+            [
+                F.normalize(self.model(item.unsqueeze(0), aug=False), p=2, dim=1)
+                for item in prepared
+            ],
+            dim=0,
+        )
+        segment_audio = torch.cat([self._segments(item) for item in prepared], dim=0)
+        segment_embeddings = []
+        segment_batch_size = (
+            self.cuda_segment_batch_size
+            if self.device.type == "cuda"
+            else self.cpu_segment_batch_size
+        )
+        for start in range(0, segment_audio.size(0), segment_batch_size):
+            segment_embeddings.append(
+                F.normalize(
+                    self.model(
+                        segment_audio[start : start + segment_batch_size], aug=False
+                    ),
+                    p=2,
+                    dim=1,
+                )
+            )
+        segments = torch.cat(segment_embeddings, dim=0).view(
+            len(prepared), self.segment_count, -1
+        )
         return full, segments
 
     @torch.inference_mode()
@@ -126,20 +194,21 @@ class ECAPATimbreValidator:
         scores_by_speaker = defaultdict(list)
         margins_by_speaker = defaultdict(list)
         accuracy_by_speaker = defaultdict(list)
+        generated_full, generated_segments = self.batch_embeddings(
+            generated, generated_lengths, sample_rate
+        )
         for index in range(generated.size(0)):
-            generated_audio = generated[index, :, : int(generated_lengths[index])]
             speaker_id = int(speaker_ids[index])
             if speaker_id not in self.references:
                 raise ValueError(f"No ECAPA reference exists for speaker {speaker_id}")
-            generated_full, generated_segments = self.embeddings(
-                generated_audio, sample_rate
-            )
+            probe_full = generated_full[index : index + 1]
+            probe_segments = generated_segments[index]
             trial_scores = {}
             for reference_speaker_id, references in self.references.items():
                 reference_full, reference_segments = references
-                full_score = torch.mean(generated_full @ reference_full.T)
+                full_score = torch.mean(probe_full @ reference_full.T)
                 segment_score = torch.mean(
-                    generated_segments @ reference_segments.T
+                    probe_segments @ reference_segments.T
                 )
                 trial_scores[reference_speaker_id] = float(
                     ((full_score + segment_score) / 2).item()
@@ -214,3 +283,36 @@ class ECAPATimbreValidator:
             }
         )
         return result
+
+    def score_batch_accelerated(
+        self,
+        generated,
+        generated_lengths,
+        speaker_ids,
+        sample_rate,
+        preferred_device,
+    ):
+        target_device = self.preferred_device(preferred_device)
+        try:
+            try:
+                self.to(target_device)
+                return self.score_batch(
+                    generated,
+                    generated_lengths,
+                    speaker_ids,
+                    sample_rate,
+                )
+            except RuntimeError as error:
+                if target_device.type != "cuda" or "out of memory" not in str(
+                    error
+                ).lower():
+                    raise
+                self.to("cpu")
+                return self.score_batch(
+                    generated,
+                    generated_lengths,
+                    speaker_ids,
+                    sample_rate,
+                )
+        finally:
+            self.to("cpu")

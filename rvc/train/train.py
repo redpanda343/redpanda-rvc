@@ -1338,8 +1338,6 @@ def train_and_evaluate(
                         device_type="cuda", enabled=use_amp, dtype=train_dtype
                     ):
                         with torch.inference_mode():
-                            if audio_reference is not None:
-                                audio_o, *_ = inference_model.infer(*audio_reference)
                             if timbre_validator is not None:
                                 try:
                                     timbre_o, *_ = inference_model.infer(
@@ -1347,6 +1345,11 @@ def train_and_evaluate(
                                     )
                                 except Exception as error:
                                     print(f"ECAPA reference generation failed: {error}")
+                            if audio_reference is not None:
+                                if timbre_o is not None:
+                                    audio_o = timbre_o[:1]
+                                else:
+                                    audio_o, *_ = inference_model.infer(*audio_reference)
             finally:
                 inference_model.train()
 
@@ -1354,14 +1357,14 @@ def train_and_evaluate(
                 try:
                     speaker_ids = timbre_reference[3]
                     generated_lengths = (
-                        timbre_reference[0][1].detach().cpu()
-                        * config.data.hop_length
+                        timbre_reference[0][1].detach() * config.data.hop_length
                     )
-                    timbre_scores = timbre_validator.score_batch(
-                        timbre_o.detach().cpu(),
+                    timbre_scores = timbre_validator.score_batch_accelerated(
+                        timbre_o.detach(),
                         generated_lengths,
                         speaker_ids,
                         config.data.sample_rate,
+                        device,
                     )
                     if timbre_scores["multi_speaker"]:
                         scalar_dict.update(
