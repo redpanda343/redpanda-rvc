@@ -43,6 +43,8 @@ ALPHA = 0.75
 POST_NORMALIZATION_MAX_GAIN = 4.0
 HIGH_PASS_CUTOFF = 20
 SAMPLE_RATE_16K = 16000
+MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS = 3.0
+MINIMUM_OUTPUT_AUDIO_SECONDS = 1.0
 AUTOMATIC_VAD_BLOCK_SECONDS = 180.0
 AUTOMATIC_VAD_CONTEXT_SECONDS = 2.0
 AUTOMATIC_VAD_MAX_BATCH_BLOCKS = 16
@@ -214,6 +216,42 @@ def clear_simple_preprocess_artifacts(exp_dir: str):
     filelist_path = os.path.join(exp_dir, "filelist.txt")
     if os.path.isfile(filelist_path):
         os.remove(filelist_path)
+
+
+def remove_short_output_audio(exp_dir: str):
+    directory_names = ("sliced_audios", "sliced_audios_16k")
+    short_stems = set()
+    for directory_name in directory_names:
+        directory = os.path.join(exp_dir, directory_name)
+        if not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if not filename.lower().endswith((".wav", ".flac")):
+                continue
+            path = os.path.join(directory, filename)
+            try:
+                info = sf.info(path)
+            except (OSError, RuntimeError):
+                continue
+            if info.frames < round(info.samplerate * MINIMUM_OUTPUT_AUDIO_SECONDS):
+                short_stems.add(os.path.splitext(filename)[0])
+
+    for directory_name in directory_names:
+        directory = os.path.join(exp_dir, directory_name)
+        if not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if (
+                filename.lower().endswith((".wav", ".flac"))
+                and os.path.splitext(filename)[0] in short_stems
+            ):
+                os.remove(os.path.join(directory, filename))
+
+    for stem in short_stems:
+        spec_path = os.path.join(exp_dir, "sliced_audios", f"{stem}.spec.pt")
+        if os.path.isfile(spec_path):
+            os.remove(spec_path)
+    return len(short_stems)
 
 
 def _ffmpeg_path():
@@ -844,6 +882,8 @@ class PreProcess:
         normalization_mode: str,
     ):
         intervals, duration_s, voice_peak = self._detect_automatic_intervals(path)
+        if duration_s < MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS:
+            return 0.0
         if not intervals:
             print(f"No speech or singing detected in: {path}")
             return duration_s
@@ -1184,14 +1224,23 @@ def preprocess_training_set(
             shutdown_fireredvad_gpu()
 
     audio_length = sum(audio_length)
+    removed_short_outputs = remove_short_output_audio(exp_dir)
     save_dataset_duration(
         os.path.join(exp_dir, "model_info.json"),
         dataset_duration=audio_length,
         dataset_format=dataset_format,
     )
     elapsed_time = time.time() - start_time
+    automatic_filter = (
+        f"Automatic sources under {MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS:.1f}s skipped; "
+        if cut_preprocess == "Automatic"
+        else ""
+    )
     print(
-        f"Preprocess completed in {elapsed_time:.2f} seconds on {format_duration(audio_length)} seconds of audio."
+        f"Preprocess completed in {elapsed_time:.2f} seconds on "
+        f"{format_duration(audio_length)} seconds of audio. Short-audio filter: "
+        f"{automatic_filter}{removed_short_outputs} output slice(s) under "
+        f"{MINIMUM_OUTPUT_AUDIO_SECONDS:.1f}s removed."
     )
 
 
