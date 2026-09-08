@@ -1,7 +1,6 @@
 import json
 import os
 import queue
-import time
 import traceback
 from pathlib import Path
 import tkinter as tk
@@ -104,7 +103,6 @@ class AudioEngine:
             device=device,
             dtype=torch.float32,
         )
-        self.rms_buffer = np.zeros(4 * self.zero_crossing, dtype=np.float32)
         self.sola_buffer = torch.zeros(
             self.sola_buffer_frame, device=device, dtype=torch.float32
         )
@@ -201,21 +199,15 @@ class AudioEngine:
         threshold = self.settings["threshold"]
         if threshold <= -60:
             return mono
-        buffered = np.append(self.rms_buffer, mono)
-        rms = librosa.feature.rms(
-            y=buffered,
-            frame_length=4 * self.zero_crossing,
-            hop_length=self.zero_crossing,
-        )[:, 2:]
-        self.rms_buffer[:] = buffered[-4 * self.zero_crossing :]
-        gated = buffered[2 * self.zero_crossing - self.zero_crossing // 2 :]
-        silent = librosa.amplitude_to_db(rms, ref=1.0)[0] < threshold
-        for index, is_silent in enumerate(silent):
-            if is_silent:
-                gated[
-                    index * self.zero_crossing : (index + 1) * self.zero_crossing
-                ] = 0
-        return gated[self.zero_crossing // 2 :]
+        gated = mono.copy()
+        complete = gated.shape[0] // self.zero_crossing
+        if complete:
+            frames = gated[: complete * self.zero_crossing].reshape(
+                complete, self.zero_crossing
+            )
+            rms = np.sqrt(np.mean(np.square(frames), axis=1) + 1e-12)
+            frames[20 * np.log10(rms) < threshold] = 0
+        return gated
 
     def _resample_input(self, source):
         converted = self.input_resampler(source)
@@ -289,6 +281,10 @@ class AudioEngine:
             if status:
                 self.error_queue.put_nowait(str(status))
             mono = librosa.to_mono(indata.T).astype(np.float32, copy=False)
+            if mono.shape[0] < self.block_frame:
+                mono = np.pad(mono, (self.block_frame - mono.shape[0], 0))
+            elif mono.shape[0] > self.block_frame:
+                mono = mono[-self.block_frame :]
             mono = self._gate_silence(mono)
             self.input_wav[:-self.block_frame] = self.input_wav[
                 self.block_frame:
@@ -354,7 +350,9 @@ class AudioEngine:
                 converted = self._mix_volume(converted)
             output = self._apply_sola(converted)
             output = output.repeat(self.channels, 1).t().detach().cpu().numpy()
-            outdata[:] = np.clip(output, -1.0, 1.0)
+            outdata.fill(0)
+            count = min(frames, output.shape[0])
+            outdata[:count] = np.clip(output[:count], -1.0, 1.0)
             self.last_infer_ms = round(infer_seconds * 1000)
         except Exception:
             outdata.fill(0)
