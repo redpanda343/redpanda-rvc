@@ -209,6 +209,8 @@ class Synthesizer(torch.nn.Module):
         pitch: Optional[torch.Tensor] = None,
         nsff0: Optional[torch.Tensor] = None,
         sid: torch.Tensor = None,
+        skip_head: Optional[int] = None,
+        return_length: Optional[int] = None,
     ):
         """
         Inference of the model.
@@ -221,10 +223,22 @@ class Synthesizer(torch.nn.Module):
             sid (torch.Tensor): Speaker embedding.
         """
         g = self.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = self.enc_p(phone, pitch, phone_lengths)
+        flow_head = 0
+        decoder_head = 0
+        if skip_head is not None and return_length is not None:
+            flow_head = max(skip_head - 24, 0)
+            decoder_head = skip_head - flow_head
+        m_p, logs_p, x_mask = self.enc_p(
+            phone, pitch, phone_lengths, flow_head if skip_head is not None else None
+        )
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
 
         z = self.flow(z_p, x_mask, g=g, reverse=True)
+        if skip_head is not None and return_length is not None:
+            z = z[:, :, decoder_head : decoder_head + return_length]
+            x_mask = x_mask[:, :, decoder_head : decoder_head + return_length]
+            if nsff0 is not None:
+                nsff0 = nsff0[:, skip_head : skip_head + return_length]
         o = (
             self.dec(z * x_mask, nsff0, g=g)
             if self.use_f0

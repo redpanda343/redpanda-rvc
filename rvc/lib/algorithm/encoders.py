@@ -126,7 +126,11 @@ class TextEncoder(torch.nn.Module):
         self.proj = torch.nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
     def forward(
-        self, phone: torch.Tensor, pitch: Optional[torch.Tensor], lengths: torch.Tensor
+        self,
+        phone: torch.Tensor,
+        pitch: Optional[torch.Tensor],
+        lengths: torch.Tensor,
+        skip_head: Optional[int] = None,
     ):
         x = self.emb_phone(phone)
         if pitch is not None and self.emb_pitch:
@@ -138,6 +142,9 @@ class TextEncoder(torch.nn.Module):
 
         x_mask = sequence_mask(lengths, x.size(2)).unsqueeze(1).to(x.dtype)
         x = self.encoder(x, x_mask)
+        if skip_head is not None:
+            x = x[:, :, skip_head:]
+            x_mask = x_mask[:, :, skip_head:]
         stats = self.proj(x) * x_mask
 
         m, logs = torch.split(stats, self.out_channels, dim=1)
