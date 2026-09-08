@@ -70,7 +70,7 @@ class Encoder(torch.nn.Module):
         )
 
     def forward(self, x, x_mask):
-        attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
+        attn_mask = x_mask.unsqueeze(2)
         x = x * x_mask
 
         for i in range(self.n_layers):

@@ -669,6 +669,7 @@ class VoiceConverter:
             self.net_g.load_state_dict(self.cpt["weight"], strict=False)
             self.net_g = self.net_g.to(self.config.device).float()
             self.net_g.eval()
+            self.net_g.remove_weight_norm()
 
     def setup_vc_instance(self):
         """

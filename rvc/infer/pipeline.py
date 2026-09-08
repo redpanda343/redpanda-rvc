@@ -169,7 +169,7 @@ class Pipeline:
             protect: Protection level for preserving the original pitch.
             inference_rng: Seed sequence shared by all segments in the input audio.
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             pitch_guidance = pitch != None and pitchf != None
             # prepare source audio
             feats = torch.from_numpy(audio0).float()
@@ -230,8 +230,6 @@ class Pipeline:
             audio1 = audio1.data.cpu().float().numpy()
             # clean up
             del feats, feats0, p_len
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         return audio1
 
     def _retrieve_speaker_embeddings(self, feats, index, big_npy, index_rate):

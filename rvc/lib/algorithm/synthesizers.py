@@ -1,5 +1,6 @@
 import torch
 from typing import Optional
+from torch.nn.utils import parametrize
 from rvc.lib.algorithm.generators.hifigan_mrf import HiFiGANMRFGenerator
 from rvc.lib.algorithm.generators.hifigan_nsf import HiFiGANNSFGenerator
 from rvc.lib.algorithm.generators.hifigan import HiFiGANGenerator
@@ -152,14 +153,12 @@ class Synthesizer(torch.nn.Module):
         )
         self.emb_g = torch.nn.Embedding(spk_embed_dim, gin_channels)
 
-    def _remove_weight_norm_from(self, module):
-        for hook in module._forward_pre_hooks.values():
-            if getattr(hook, "__class__", None).__name__ == "WeightNorm":
-                torch.nn.utils.remove_weight_norm(module)
-
     def remove_weight_norm(self):
-        for module in [self.dec, self.flow, self.enc_q]:
-            self._remove_weight_norm_from(module)
+        for module in tuple(self.modules()):
+            if parametrize.is_parametrized(module, "weight"):
+                parametrize.remove_parametrizations(
+                    module, "weight", leave_parametrized=True
+                )
 
     def __prepare_scriptable__(self):
         self.remove_weight_norm()
