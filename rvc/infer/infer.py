@@ -411,7 +411,7 @@ class VoiceConverter:
             intervals = prepared_intervals
 
         expected_embedder = self.cpt.get("embedder_model")
-        built_in_embedders = {"contentvec", "spin-v2", "spin-wavlm-512"}
+        built_in_embedders = {"contentvec", "spin-v2"}
         if (
             expected_embedder in built_in_embedders
             and embedder_model != expected_embedder

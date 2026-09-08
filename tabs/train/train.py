@@ -674,7 +674,6 @@ def train_tab():
                 choices=[
                     "contentvec",
                     "spin-v2",
-                    "spin-wavlm-512",
                 ],
                 value="contentvec",
                 interactive=True,

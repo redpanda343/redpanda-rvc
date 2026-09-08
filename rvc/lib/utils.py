@@ -14,8 +14,6 @@ import logging
 from transformers import AutoFeatureExtractor, HubertModel
 import warnings
 
-from rvc.lib.embedders.spin_wavlm import SpinWavLMModel
-
 # Remove this to see warnings about transformers models
 warnings.filterwarnings("ignore")
 
@@ -46,20 +44,6 @@ def get_embedding_metadata(embedder_model, custom_embedder=None):
         chosen_model = "contentvec"
         model_path = os.path.join(embedder_root, "contentvec")
         embedder_model = "contentvec"
-    if embedder_model == "spin-wavlm-512":
-        from rvc.lib.tools.convert_spin_wavlm import ensure_converted
-
-        ensure_converted(model_path)
-        config_path = os.path.join(model_path, "spin_config.json")
-        with open(config_path, "r", encoding="utf-8") as config_file:
-            spin_config = json.load(config_file)
-        return {
-            "embedder_model": chosen_model,
-            "feature_dim": int(spin_config["feature_dim"]),
-            "feature_output": spin_config["feature_output"],
-            "feature_fingerprint": spin_config["source_checkpoint_sha256"],
-        }
-
     feature_dim = 768
     if embedder_model == "custom" and model_path:
         config_path = os.path.join(model_path, "config.json")
@@ -138,7 +122,6 @@ def load_embedding(embedder_model, custom_embedder=None):
     embedding_list = {
         "contentvec": os.path.join(embedder_root, "contentvec"),
         "spin-v2": os.path.join(embedder_root, "spin-v2"),
-        "spin-wavlm-512": os.path.join(embedder_root, "spin-wavlm-512"),
     }
 
     online_embedders = {
@@ -162,11 +145,6 @@ def load_embedding(embedder_model, custom_embedder=None):
             model_path = embedding_list["contentvec"]
     else:
         model_path = embedding_list[embedder_model]
-        if embedder_model == "spin-wavlm-512":
-            from rvc.lib.tools.convert_spin_wavlm import ensure_converted
-
-            ensure_converted(model_path)
-            return SpinWavLMModel(model_path)
         bin_file = os.path.join(model_path, "pytorch_model.bin")
         json_file = os.path.join(model_path, "config.json")
         preprocessor_json_file = os.path.join(

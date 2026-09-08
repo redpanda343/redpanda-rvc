@@ -951,7 +951,6 @@ def inference_tab():
                     choices=[
                         "contentvec",
                         "spin-v2",
-                        "spin-wavlm-512",
                     ],
                     value="contentvec",
                     interactive=True,
@@ -1462,7 +1461,6 @@ def inference_tab():
                     choices=[
                         "contentvec",
                         "spin-v2",
-                        "spin-wavlm-512",
                     ],
                     value="contentvec",
                     interactive=True,
@@ -1660,7 +1658,7 @@ def inference_tab():
             multi_embedder_model = gr.Radio(
                 label=i18n("Embedder Model"),
                 info=i18n("Model used for generating content features."),
-                choices=["contentvec", "spin-v2", "spin-wavlm-512"],
+                choices=["contentvec", "spin-v2"],
                 value="contentvec",
                 interactive=True,
             )
@@ -1845,7 +1843,7 @@ def inference_tab():
             batch_multi_embedder_model = gr.Radio(
                 label=i18n("Embedder Model"),
                 info=i18n("Model used for generating content features."),
-                choices=["contentvec", "spin-v2", "spin-wavlm-512"],
+                choices=["contentvec", "spin-v2"],
                 value="contentvec",
                 interactive=True,
             )

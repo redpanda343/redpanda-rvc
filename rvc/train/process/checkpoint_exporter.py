@@ -78,12 +78,7 @@ def export_generator_checkpoint(checkpoint_path, precision, output_name=None):
     model_name = os.path.basename(model_dir)
     vocoder = _detect_vocoder(state_dict)
     feature_dim = int(getattr(hps.model, "text_enc_hidden_dim", 768))
-    embedder_model = None
-    model_info_path = os.path.join(model_dir, "model_info.json")
-    if os.path.isfile(model_info_path):
-        with open(model_info_path, "r", encoding="utf-8") as model_info_file:
-            embedder_model = json.load(model_info_file).get("embedder_model")
-    if feature_dim == 256 and embedder_model != "spin-wavlm-512":
+    if feature_dim == 256:
         version = "v1"
     else:
         version = "v3" if vocoder == "RefineGAN" else "v2"

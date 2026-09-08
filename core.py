@@ -1001,7 +1001,6 @@ def _infer_opts(func):
                 [
                     "contentvec",
                     "spin-v2",
-                    "spin-wavlm-512",
                     "custom",
                 ]
             ),
@@ -1293,7 +1292,6 @@ def preprocess(**kwargs):
         [
             "contentvec",
             "spin-v2",
-            "spin-wavlm-512",
             "custom",
         ]
     ),
