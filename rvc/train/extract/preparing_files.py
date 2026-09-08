@@ -1,29 +1,18 @@
 import os
+import shutil
 from random import shuffle
 from rvc.configs.config import Config
 import json
-
-import numpy as np
 
 config = Config()
 current_directory = os.getcwd()
 
 
 def generate_config(sample_rate: int, model_path: str):
-    config_save_path = os.path.join(model_path, "config.json")
-    with open(
-        os.path.join(model_path, "model_info.json"), "r", encoding="utf-8"
-    ) as info_file:
-        model_info = json.load(info_file)
-    feature_dim = int(model_info.get("feature_dim", 768))
     config_path = os.path.join("rvc", "configs", f"{sample_rate}.json")
-    source_path = config_save_path if os.path.isfile(config_save_path) else config_path
-    with open(source_path, "r", encoding="utf-8") as config_file:
-        config_data = json.load(config_file)
-    config_data["model"]["text_enc_hidden_dim"] = feature_dim
-    with open(config_save_path, "w", encoding="utf-8") as config_file:
-        json.dump(config_data, config_file, indent=4)
-        config_file.write("\n")
+    config_save_path = os.path.join(model_path, "config.json")
+    if not os.path.exists(config_save_path):
+        shutil.copyfile(config_path, config_save_path)
 
 
 def generate_filelist(model_path: str, sample_rate: int, include_mutes: int = 2):
@@ -40,11 +29,9 @@ def generate_filelist(model_path: str, sample_rate: int, include_mutes: int = 2)
             model_info = json.load(f)
             embedder_name = model_info["embedder_model"]
             dataset_format = str(model_info.get("dataset_format", "wav")).lower()
-            feature_dim = int(model_info.get("feature_dim", 768))
     except:
         embedder_name = "contentvec"
         dataset_format = "wav"
-        feature_dim = 768
 
     if dataset_format not in {"wav", "flac"}:
         dataset_format = "wav"
@@ -151,12 +138,6 @@ def generate_filelist(model_path: str, sample_rate: int, include_mutes: int = 2)
         absolute_mute_feature_path = os.path.abspath(mute_feature_path)
         if not os.path.isfile(absolute_mute_feature_path):
             raise RuntimeError(f"Mute feature not found: {absolute_mute_feature_path}")
-        mute_feature = np.load(absolute_mute_feature_path, mmap_mode="r")
-        if mute_feature.ndim != 2 or mute_feature.shape[1] != feature_dim:
-            raise RuntimeError(
-                f"Mute feature has shape {mute_feature.shape}; expected "
-                f"[frames, {feature_dim}]."
-            )
 
         # adding x files per sid
         for sid in sids * include_mutes:
