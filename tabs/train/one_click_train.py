@@ -414,7 +414,6 @@ def _run_one_click_training(
         gpu=gpu,
         sample_rate=sampling_rate,
         embedder_model=embedder_model,
-        embedder_model_custom=None,
         include_mutes=include_mutes,
     )
     if _failed(extract_message):

@@ -142,10 +142,8 @@ def run_pitch_extraction(files, devices, f0_method, threads):
     print(f"Pitch extraction completed in {time.time() - start_time:.2f} seconds.")
 
 
-def process_file_embedding(
-    files, embedder_model, embedder_model_custom, device_num, device, n_threads
-):
-    model = load_embedding(embedder_model, embedder_model_custom).to(device).float()
+def process_file_embedding(files, embedder_model, device_num, device, n_threads):
+    model = load_embedding(embedder_model).to(device).float()
     model.eval()
     n_threads = max(1, n_threads)
 
@@ -179,9 +177,7 @@ def process_file_embedding(
                 pbar.update(1)
 
 
-def run_embedding_extraction(
-    files, devices, embedder_model, embedder_model_custom, threads
-):
+def run_embedding_extraction(files, devices, embedder_model, threads):
     devices_str = ", ".join(devices)
     print(
         f"Starting embedding extraction with {threads} cores on {devices_str}..."
@@ -193,7 +189,6 @@ def run_embedding_extraction(
                 process_file_embedding,
                 files[i :: len(devices)],
                 embedder_model,
-                embedder_model_custom,
                 i,
                 devices[i],
                 threads // len(devices),
@@ -213,8 +208,7 @@ if __name__ == "__main__":
     gpus = sys.argv[4]
     sample_rate = sys.argv[5]
     embedder_model = sys.argv[6]
-    embedder_model_custom = sys.argv[7] if len(sys.argv) > 7 else None
-    include_mutes = int(sys.argv[8]) if len(sys.argv) > 8 else 2
+    include_mutes = int(sys.argv[7]) if len(sys.argv) > 7 else 2
 
     wav_path = os.path.join(exp_dir, "sliced_audios_16k")
 
@@ -228,7 +222,7 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(exp_dir, "f0_voiced"), exist_ok=True)
     os.makedirs(os.path.join(exp_dir, "extracted"), exist_ok=True)
 
-    metadata = get_embedding_metadata(embedder_model, embedder_model_custom)
+    metadata = get_embedding_metadata(embedder_model)
     file_path = os.path.join(exp_dir, "model_info.json")
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
@@ -298,9 +292,7 @@ if __name__ == "__main__":
 
     run_pitch_extraction(files, devices, f0_method, num_processes)
 
-    run_embedding_extraction(
-        files, devices, embedder_model, embedder_model_custom, num_processes
-    )
+    run_embedding_extraction(files, devices, embedder_model, num_processes)
 
     generate_config(sample_rate, exp_dir)
     generate_filelist(exp_dir, sample_rate, include_mutes)

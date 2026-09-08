@@ -50,12 +50,6 @@ pretraineds_custom_path = os.path.join(
 
 pretraineds_custom_path_relative = os.path.relpath(pretraineds_custom_path, now_dir)
 
-custom_embedder_root = os.path.join(
-    now_dir, "rvc", "models", "embedders", "embedders_custom"
-)
-custom_embedder_root_relative = os.path.relpath(custom_embedder_root, now_dir)
-
-os.makedirs(custom_embedder_root, exist_ok=True)
 os.makedirs(pretraineds_custom_path_relative, exist_ok=True)
 
 
@@ -126,19 +120,6 @@ def refresh_models_and_datasets():
     )
 
 
-# Refresh Custom Embedders
-def get_embedder_custom_list():
-    return [
-        os.path.join(dirpath, dirname)
-        for dirpath, dirnames, _ in os.walk(custom_embedder_root_relative)
-        for dirname in dirnames
-    ]
-
-
-def refresh_custom_embedder_list():
-    return {"choices": sorted(get_embedder_custom_list()), "__type__": "update"}
-
-
 # Drop Model
 def save_drop_model(dropbox):
     if ".pth" not in dropbox:
@@ -189,41 +170,6 @@ def save_drop_dataset_audio(dropbox, dataset_name):
             relative_dataset_path = os.path.relpath(dataset_path, now_dir)
 
             return None, relative_dataset_path
-
-
-# Drop Custom Embedder
-def create_folder_and_move_files(folder_name, bin_file, config_file):
-    if not folder_name:
-        return "Folder name must not be empty."
-
-    folder_name = os.path.basename(folder_name)
-    target_folder = os.path.join(custom_embedder_root, folder_name)
-
-    normalized_target_folder = os.path.abspath(target_folder)
-    normalized_custom_embedder_root = os.path.abspath(custom_embedder_root)
-
-    if not normalized_target_folder.startswith(normalized_custom_embedder_root):
-        return "Invalid folder name. Folder must be within the custom embedder root directory."
-
-    os.makedirs(target_folder, exist_ok=True)
-
-    if bin_file:
-        shutil.copy(bin_file, os.path.join(target_folder, os.path.basename(bin_file)))
-    if config_file:
-        shutil.copy(
-            config_file, os.path.join(target_folder, os.path.basename(config_file))
-        )
-
-    return f"Files moved to folder {target_folder}"
-
-
-def refresh_embedders_folders():
-    custom_embedders = [
-        os.path.join(dirpath, dirname)
-        for dirpath, dirnames, _ in os.walk(custom_embedder_root_relative)
-        for dirname in dirnames
-    ]
-    return custom_embedders
 
 
 # Export
@@ -690,30 +636,6 @@ def train_tab():
             value=True,
             interactive=True,
         )
-        with gr.Row(visible=False) as embedder_custom:
-            with gr.Accordion(i18n("Custom Embedder"), open=True):
-                with gr.Row():
-                    embedder_model_custom = gr.Dropdown(
-                        label=i18n("Select Custom Embedder"),
-                        choices=refresh_embedders_folders(),
-                        interactive=True,
-                        allow_custom_value=True,
-                    )
-                    refresh_embedders_button = gr.Button(i18n("Refresh embedders"))
-                folder_name_input = gr.Textbox(
-                    label=i18n("Folder Name"), interactive=True
-                )
-                with gr.Row():
-                    bin_file_upload = gr.File(
-                        label=i18n("Upload .bin"), type="filepath", interactive=True
-                    )
-                    config_file_upload = gr.File(
-                        label=i18n("Upload .json"), type="filepath", interactive=True
-                    )
-                move_files_button = gr.Button(
-                    i18n("Move files to custom embedder folder")
-                )
-
         extract_output_info = gr.Textbox(
             label=i18n("Output Information"),
             info=i18n("The output information will be displayed here."),
@@ -731,7 +653,6 @@ def train_tab():
                 gpu,
                 sampling_rate,
                 embedder_model,
-                embedder_model_custom,
                 include_mutes,
             ],
             outputs=[extract_output_info],
@@ -1013,11 +934,6 @@ def train_tab():
                 else:
                     return gr.update(visible=pretrained), gr.update(visible=pretrained)
 
-            def toggle_visible_embedder_custom(embedder_model):
-                if embedder_model == "custom":
-                    return {"visible": True, "__type__": "update"}
-                return {"visible": False, "__type__": "update"}
-
             def toggle_architecture(architecture):
                 if architecture == "Applio":
                     return {
@@ -1116,24 +1032,6 @@ def train_tab():
                 fn=save_drop_dataset_audio,
                 inputs=[upload_audio_dataset, dataset_name],
                 outputs=[upload_audio_dataset, dataset_path],
-            )
-            embedder_model.change(
-                fn=toggle_visible_embedder_custom,
-                inputs=[embedder_model],
-                outputs=[embedder_custom],
-            )
-            embedder_model.change(
-                fn=toggle_visible_embedder_custom,
-                inputs=[embedder_model],
-                outputs=[embedder_custom],
-            )
-            move_files_button.click(
-                fn=create_folder_and_move_files,
-                inputs=[folder_name_input, bin_file_upload, config_file_upload],
-                outputs=[],
-            )
-            refresh_embedders_button.click(
-                fn=refresh_embedders_folders, inputs=[], outputs=[embedder_model_custom]
             )
             pretrained.change(
                 fn=toggle_pretrained,

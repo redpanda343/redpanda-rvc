@@ -65,7 +65,6 @@ def run_infer_script(
     clean_strength: float,
     export_format: str,
     embedder_model: str,
-    embedder_model_custom: str = None,
     post_process: bool = False,
     reverb: bool = False,
     pitch_shift: bool = False,
@@ -121,7 +120,6 @@ def run_infer_script(
         "clean_strength": clean_strength,
         "export_format": export_format,
         "embedder_model": embedder_model,
-        "embedder_model_custom": embedder_model_custom,
         "post_process": post_process,
         "reverb": reverb,
         "pitch_shift": pitch_shift,
@@ -184,7 +182,6 @@ def run_batch_infer_script(
     clean_strength: float,
     export_format: str,
     embedder_model: str,
-    embedder_model_custom: str = None,
     post_process: bool = False,
     reverb: bool = False,
     pitch_shift: bool = False,
@@ -240,7 +237,6 @@ def run_batch_infer_script(
         "clean_strength": clean_strength,
         "export_format": export_format,
         "embedder_model": embedder_model,
-        "embedder_model_custom": embedder_model_custom,
         "post_process": post_process,
         "reverb": reverb,
         "pitch_shift": pitch_shift,
@@ -535,7 +531,6 @@ def run_extract_script(
     gpu: int,
     sample_rate: int,
     embedder_model: str,
-    embedder_model_custom: str = None,
     include_mutes: int = 2,
 ):
     model_path = os.path.join(logs_path, model_name)
@@ -553,7 +548,6 @@ def run_extract_script(
                 gpu,
                 sample_rate,
                 embedder_model,
-                embedder_model_custom,
                 include_mutes,
             ],
         ),
@@ -1001,17 +995,10 @@ def _infer_opts(func):
                 [
                     "contentvec",
                     "spin-v2",
-                    "custom",
                 ]
             ),
             default="contentvec",
             help="Model used for generating speaker embeddings.",
-        ),
-        click.option(
-            "--embedder-model-custom",
-            type=str,
-            default=None,
-            help="Path to a custom embedding model (only when --embedder-model is 'custom').",
         ),
         click.option(
             "--sid", type=int, default=0, help="Speaker ID for multi-speaker models."
@@ -1283,7 +1270,7 @@ def preprocess(**kwargs):
 @click.option(
     "--sample-rate",
     required=True,
-    type=click.Choice(["32000", "40000", "44100", "48000"]),
+    type=click.Choice(["32000", "40000", "48000"]),
     help="Target sampling rate.",
 )
 @click.option(
@@ -1292,17 +1279,10 @@ def preprocess(**kwargs):
         [
             "contentvec",
             "spin-v2",
-            "custom",
         ]
     ),
     default="contentvec",
     help="Model used for generating speaker embeddings.",
-)
-@click.option(
-    "--embedder-model-custom",
-    type=str,
-    default=None,
-    help="Path to custom embedding model.",
 )
 @click.option(
     "--include-mutes",
@@ -1321,7 +1301,6 @@ def extract(**kwargs):
         gpu=kwargs["gpu"],
         sample_rate=kwargs["sample_rate"],
         embedder_model=kwargs["embedder_model"],
-        embedder_model_custom=kwargs["embedder_model_custom"],
         include_mutes=kwargs["include_mutes"],
     )
     click.echo(result)

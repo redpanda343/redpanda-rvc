@@ -1,10 +1,8 @@
+import json
 import os
 import shutil
 from random import shuffle
-from rvc.configs.config import Config
-import json
 
-config = Config()
 current_directory = os.getcwd()
 
 
@@ -35,6 +33,8 @@ def generate_filelist(model_path: str, sample_rate: int, include_mutes: int = 2)
 
     if dataset_format not in {"wav", "flac"}:
         dataset_format = "wav"
+    if embedder_name not in {"contentvec", "spin-v2"}:
+        raise RuntimeError(f"Unsupported embedder model: {embedder_name}")
 
     if embedder_name == "spin-v2":
         mute_base_path = os.path.join(current_directory, "logs", "mute_spin-v2")

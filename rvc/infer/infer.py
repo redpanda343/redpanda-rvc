@@ -138,15 +138,14 @@ class VoiceConverter:
         self.use_f0 = None  # Whether the model uses F0
         self.loaded_model = None
 
-    def load_hubert(self, embedder_model: str, embedder_model_custom: str = None):
+    def load_hubert(self, embedder_model: str):
         """
         Loads the HuBERT model for speaker embedding extraction.
 
         Args:
             embedder_model (str): Path to the pre-trained HuBERT model.
-            embedder_model_custom (str): Path to the custom HuBERT model.
         """
-        self.hubert_model = load_embedding(embedder_model, embedder_model_custom)
+        self.hubert_model = load_embedding(embedder_model)
         self.hubert_model = self.hubert_model.to(self.config.device).float()
         self.hubert_model.eval()
 
@@ -353,7 +352,6 @@ class VoiceConverter:
         hop_length: int = 128,
         split_audio: bool = False,
         embedder_model: str = "contentvec",
-        embedder_model_custom: str = None,
         clean_audio: bool = False,
         clean_strength: float = 0.5,
         export_format: str = "WAV",
@@ -383,7 +381,6 @@ class VoiceConverter:
             export_format (str): Format for exporting the audio.
             f0_file (str): Path to the F0 file.
             embedder_model (str): Path to the embedder model.
-            embedder_model_custom (str): Path to the custom embedder model.
             resample_sr (int, optional): Resample sampling rate. Default is 0.
             sid (int, optional): Speaker ID. Default is 0.
             seed (int, optional): Random seed used for model inference.
@@ -412,6 +409,10 @@ class VoiceConverter:
 
         expected_embedder = self.cpt.get("embedder_model")
         built_in_embedders = {"contentvec", "spin-v2"}
+        if expected_embedder and expected_embedder not in built_in_embedders:
+            raise RuntimeError(
+                f"This voice model uses unsupported embedder {expected_embedder}."
+            )
         if (
             expected_embedder in built_in_embedders
             and embedder_model != expected_embedder
@@ -420,10 +421,9 @@ class VoiceConverter:
                 f"This voice model was trained with {expected_embedder}, but "
                 f"{embedder_model} is selected."
             )
-        embedder_key = (embedder_model, embedder_model_custom)
-        if not self.hubert_model or embedder_key != self.last_embedder_model:
-            self.load_hubert(embedder_model, embedder_model_custom)
-            self.last_embedder_model = embedder_key
+        if not self.hubert_model or embedder_model != self.last_embedder_model:
+            self.load_hubert(embedder_model)
+            self.last_embedder_model = embedder_model
 
         file_index = (
             index_path.strip()

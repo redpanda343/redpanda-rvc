@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 import soxr
@@ -32,31 +31,14 @@ class HubertModelWithFinalProj(HubertModel):
         self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
 
 
-def get_embedding_metadata(embedder_model, custom_embedder=None):
-    embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
-    chosen_model = custom_embedder if embedder_model == "custom" else embedder_model
-    model_path = (
-        custom_embedder
-        if embedder_model == "custom"
-        else os.path.join(embedder_root, embedder_model)
-    )
-    if embedder_model == "custom" and not os.path.exists(str(model_path)):
-        chosen_model = "contentvec"
-        model_path = os.path.join(embedder_root, "contentvec")
-        embedder_model = "contentvec"
-    feature_dim = 768
-    if embedder_model == "custom" and model_path:
-        config_path = os.path.join(model_path, "config.json")
-        try:
-            with open(config_path, "r", encoding="utf-8") as config_file:
-                feature_dim = int(json.load(config_file).get("hidden_size", 768))
-        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-            pass
+def get_embedding_metadata(embedder_model):
+    if embedder_model not in {"contentvec", "spin-v2"}:
+        raise ValueError(f"Unsupported embedder model: {embedder_model}")
     return {
-        "embedder_model": chosen_model,
-        "feature_dim": feature_dim,
+        "embedder_model": embedder_model,
+        "feature_dim": 768,
         "feature_output": "last_hidden_state",
-        "feature_fingerprint": str(chosen_model),
+        "feature_fingerprint": embedder_model,
     }
 
 
@@ -114,7 +96,7 @@ def format_title(title):
     return formatted_title
 
 
-def load_embedding(embedder_model, custom_embedder=None):
+def load_embedding(embedder_model):
     embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
     rvc_contentvec_base_url = (
         "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base"
@@ -137,35 +119,28 @@ def load_embedding(embedder_model, custom_embedder=None):
         "contentvec": f"{rvc_contentvec_base_url}/preprocessor_config.json",
     }
 
-    if embedder_model == "custom":
-        if os.path.exists(custom_embedder):
-            model_path = custom_embedder
-        else:
-            print(f"Custom embedder not found: {custom_embedder}, using contentvec")
-            model_path = embedding_list["contentvec"]
-    else:
-        model_path = embedding_list[embedder_model]
-        bin_file = os.path.join(model_path, "pytorch_model.bin")
-        json_file = os.path.join(model_path, "config.json")
-        preprocessor_json_file = os.path.join(
-            model_path, "preprocessor_config.json"
-        )
-        os.makedirs(model_path, exist_ok=True)
-        if not os.path.exists(bin_file):
-            url = online_embedders[embedder_model]
-            print(f"Downloading {url} to {model_path}...")
-            wget.download(url, out=bin_file)
-        if not os.path.exists(json_file):
-            url = config_files[embedder_model]
-            print(f"Downloading {url} to {model_path}...")
-            wget.download(url, out=json_file)
-        if (
-            embedder_model in preprocessor_config_files
-            and not os.path.exists(preprocessor_json_file)
-        ):
-            url = preprocessor_config_files[embedder_model]
-            print(f"Downloading {url} to {model_path}...")
-            wget.download(url, out=preprocessor_json_file)
+    if embedder_model not in embedding_list:
+        raise ValueError(f"Unsupported embedder model: {embedder_model}")
+    model_path = embedding_list[embedder_model]
+    bin_file = os.path.join(model_path, "pytorch_model.bin")
+    json_file = os.path.join(model_path, "config.json")
+    preprocessor_json_file = os.path.join(model_path, "preprocessor_config.json")
+    os.makedirs(model_path, exist_ok=True)
+    if not os.path.exists(bin_file):
+        url = online_embedders[embedder_model]
+        print(f"Downloading {url} to {model_path}...")
+        wget.download(url, out=bin_file)
+    if not os.path.exists(json_file):
+        url = config_files[embedder_model]
+        print(f"Downloading {url} to {model_path}...")
+        wget.download(url, out=json_file)
+    if (
+        embedder_model in preprocessor_config_files
+        and not os.path.exists(preprocessor_json_file)
+    ):
+        url = preprocessor_config_files[embedder_model]
+        print(f"Downloading {url} to {model_path}...")
+        wget.download(url, out=preprocessor_json_file)
 
     models = HubertModelWithFinalProj.from_pretrained(model_path)
     preprocessor_json_file = os.path.join(model_path, "preprocessor_config.json")
@@ -176,12 +151,7 @@ def load_embedding(embedder_model, custom_embedder=None):
         models.audio_requires_normalization = bool(feature_extractor.do_normalize)
     else:
         models.audio_requires_normalization = False
-    metadata = get_embedding_metadata(
-        "contentvec"
-        if embedder_model == "custom" and model_path == embedding_list["contentvec"]
-        else embedder_model,
-        custom_embedder,
-    )
+    metadata = get_embedding_metadata(embedder_model)
     models.feature_dim = metadata["feature_dim"]
     models.feature_output = metadata["feature_output"]
     models.feature_fingerprint = metadata["feature_fingerprint"]
