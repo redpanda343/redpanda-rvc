@@ -69,6 +69,10 @@ class AudioRingBuffer:
 
 
 class AudioEngine:
+    SOLA_SILENCE_RMS = 1e-4
+    SOLA_MIN_CORRELATION = 0.2
+    SOLA_MIN_IMPROVEMENT = 0.05
+
     def __init__(self, error_queue):
         self.error_queue = error_queue
         self.stream = None
@@ -347,18 +351,50 @@ class AudioEngine:
             rms_source / rms_converted, 1.0 - rate
         )
 
+    def _find_sola_offset(self, converted):
+        search = converted[
+            None, None, : self.sola_buffer_frame + self.sola_search_frame
+        ]
+        reference = self.sola_buffer
+        reference_centered = reference - reference.mean()
+        reference_energy = reference_centered.square().sum()
+        candidate_sum = F.conv1d(search, self.sola_den_kernel)
+        candidate_square_sum = F.conv1d(search.square(), self.sola_den_kernel)
+        candidate_energy = torch.clamp(
+            candidate_square_sum
+            - candidate_sum.square() / self.sola_buffer_frame,
+            min=0.0,
+        )
+        numerator = F.conv1d(search, reference_centered[None, None])
+        denominator = torch.sqrt(reference_energy * candidate_energy).clamp_min(
+            torch.finfo(converted.dtype).eps
+        )
+        correlation = (numerator / denominator)[0, 0]
+        best_correlation, best_offset = torch.max(correlation, dim=0)
+        reference_rms = torch.sqrt(reference_energy / self.sola_buffer_frame)
+        candidate_rms = torch.sqrt(
+            candidate_energy[0, 0, best_offset] / self.sola_buffer_frame
+        )
+        confident = (
+            (reference_rms >= self.SOLA_SILENCE_RMS)
+            & (candidate_rms >= self.SOLA_SILENCE_RMS)
+            & torch.isfinite(best_correlation)
+            & (best_correlation >= self.SOLA_MIN_CORRELATION)
+            & (
+                best_correlation - correlation[0]
+                >= self.SOLA_MIN_IMPROVEMENT
+            )
+        )
+        selected_offset = torch.where(
+            confident, best_offset, torch.zeros_like(best_offset)
+        )
+        return int(selected_offset.item())
+
     def _apply_sola(self, converted):
         needed = self.block_frame + self.sola_buffer_frame + self.sola_search_frame
         if converted.shape[0] < needed:
             converted = F.pad(converted, (0, needed - converted.shape[0]))
-        search = converted[
-            None, None, : self.sola_buffer_frame + self.sola_search_frame
-        ]
-        numerator = F.conv1d(search, self.sola_buffer[None, None])
-        denominator = torch.sqrt(
-            F.conv1d(search.square(), self.sola_den_kernel) + 1e-8
-        )
-        offset = int(torch.argmax(numerator[0, 0] / denominator[0, 0]).item())
+        offset = self._find_sola_offset(converted)
         converted = converted[offset:]
         converted[: self.sola_buffer_frame] *= self.fade_in
         converted[: self.sola_buffer_frame] += self.sola_buffer * self.fade_out
