@@ -1,6 +1,8 @@
 import json
 import os
 import queue
+import threading
+import time
 import traceback
 from pathlib import Path
 import tkinter as tk
@@ -23,6 +25,49 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "assets" / "realtime_config.json"
 
 
+class AudioRingBuffer:
+    def __init__(self, capacity, channels):
+        self.capacity = int(capacity)
+        self.channels = int(channels)
+        self.data = np.zeros((self.capacity, self.channels), dtype=np.float32)
+        self.read_position = 0
+        self.write_position = 0
+
+    @property
+    def available(self):
+        return self.write_position - self.read_position
+
+    @property
+    def free(self):
+        return self.capacity - self.available
+
+    def write(self, values):
+        count = min(int(values.shape[0]), self.free)
+        if count <= 0:
+            return 0
+        start = self.write_position % self.capacity
+        first = min(count, self.capacity - start)
+        self.data[start : start + first] = values[:first]
+        remaining = count - first
+        if remaining:
+            self.data[:remaining] = values[first : first + remaining]
+        self.write_position += count
+        return count
+
+    def read_into(self, target):
+        count = min(int(target.shape[0]), self.available)
+        if count <= 0:
+            return 0
+        start = self.read_position % self.capacity
+        first = min(count, self.capacity - start)
+        target[:first] = self.data[start : start + first]
+        remaining = count - first
+        if remaining:
+            target[first : first + remaining] = self.data[:remaining]
+        self.read_position += count
+        return count
+
+
 class AudioEngine:
     def __init__(self, error_queue):
         self.error_queue = error_queue
@@ -30,7 +75,19 @@ class AudioEngine:
         self.rvc = None
         self.running = False
         self.last_infer_ms = 0
+        self.last_block_ms = 0
         self.algorithm_latency_ms = 0
+        self.worker_thread = None
+        self.worker_event = threading.Event()
+        self.worker_stop = threading.Event()
+        self.input_ring = None
+        self.output_ring = None
+        self.worker_input = None
+        self.prime_frames_remaining = 0
+        self.output_primed = False
+        self.input_overflow_reported = False
+        self.output_underflow_reported = False
+        self.base_latency_ms = 0.0
 
     def start(self, settings):
         self.stop()
@@ -136,10 +193,22 @@ class AudioEngine:
         extra_settings = None
         if settings["wasapi_exclusive"] and "WASAPI" in settings["host_api"]:
             extra_settings = sd.WasapiSettings(exclusive=True)
+        ring_capacity = self.block_frame * 4
+        self.input_ring = AudioRingBuffer(ring_capacity, channels)
+        self.output_ring = AudioRingBuffer(ring_capacity, channels)
+        self.worker_input = np.empty(
+            (self.block_frame, channels), dtype=np.float32
+        )
+        self.prime_frames_remaining = 5 * self.zero_crossing
+        self.output_primed = False
+        self.input_overflow_reported = False
+        self.output_underflow_reported = False
+        self.worker_stop.clear()
+        self.worker_event.clear()
         self.stream = sd.Stream(
             device=(settings["input_device"], settings["output_device"]),
             samplerate=stream_rate,
-            blocksize=self.block_frame,
+            blocksize=0,
             channels=channels,
             dtype="float32",
             latency="low",
@@ -155,19 +224,45 @@ class AudioEngine:
             settings["f0_method"],
         )
         self.rvc.reset_caches()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        self._process_block(
+            np.zeros((self.block_frame, channels), dtype=np.float32)
+        )
+        self.rvc.reset_caches()
+        self.input_wav.zero_()
+        self.input_wav_res.zero_()
+        self.sola_buffer.zero_()
         self.running = True
+        self.worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name="ApplioRealtimeWorker",
+            daemon=True,
+        )
+        self.worker_thread.start()
         self.stream.start()
         stream_latency = self.stream.latency
-        output_latency = stream_latency[1] if isinstance(stream_latency, tuple) else stream_latency
+        if isinstance(stream_latency, tuple):
+            input_latency, output_latency = stream_latency
+        else:
+            input_latency = output_latency = stream_latency
+        self.base_latency_ms = (
+            input_latency
+            + output_latency
+            + settings["block_time"]
+            + settings["crossfade_time"]
+            + 0.01
+            + self.prime_frames_remaining / stream_rate
+        ) * 1000
+        self._refresh_latency()
+
+    def _refresh_latency(self):
         self.algorithm_latency_ms = round(
-            (output_latency + settings["block_time"] + settings["crossfade_time"])
-            * 1000
+            self.base_latency_ms + self.last_block_ms
         )
 
     def stop(self):
         self.running = False
+        self.worker_stop.set()
+        self.worker_event.set()
         if self.stream is not None:
             try:
                 if self.stream.active:
@@ -180,6 +275,12 @@ class AudioEngine:
                 except sd.PortAudioError:
                     pass
                 self.stream = None
+        if (
+            self.worker_thread is not None
+            and self.worker_thread is not threading.current_thread()
+        ):
+            self.worker_thread.join(timeout=5)
+        self.worker_thread = None
 
     def update_pitch(self, pitch):
         if self.rvc is not None:
@@ -266,53 +367,101 @@ class AudioEngine:
         ]
         return converted[: self.block_frame]
 
+    def _process_block(self, indata):
+        started = time.perf_counter()
+        mono = librosa.to_mono(indata.T).astype(np.float32, copy=False)
+        mono = self._gate_silence(mono)
+        self.input_wav[:-self.block_frame] = self.input_wav[
+            self.block_frame:
+        ].clone()
+        self.input_wav[-self.block_frame:] = torch.from_numpy(mono).to(
+            self.rvc.device
+        )
+        self.input_wav_res[:-self.block_frame_16k] = self.input_wav_res[
+            self.block_frame_16k:
+        ].clone()
+        resample_source = self.input_wav[
+            -self.block_frame - 2 * self.zero_crossing :
+        ]
+        resampled = self._resample_input(resample_source)
+        self.input_wav_res[-resampled.shape[0] :] = resampled
+        if self.settings["monitor_input"]:
+            converted = self.input_wav[self.extra_frame :].clone()
+            infer_seconds = 0.0
+        else:
+            converted, infer_seconds = self.rvc.infer(
+                self.input_wav_res,
+                self.block_frame_16k,
+                self.skip_head,
+                self.return_length,
+                self.settings["f0_method"],
+            )
+            if self.output_resampler is not None:
+                converted = self.output_resampler(converted)
+            converted = self._mix_volume(converted)
+        output = self._apply_sola(converted)
+        output = output.repeat(self.channels, 1).t().detach().cpu().numpy()
+        np.clip(output, -1.0, 1.0, out=output)
+        self.last_infer_ms = round(infer_seconds * 1000)
+        self.last_block_ms = round((time.perf_counter() - started) * 1000)
+        self._refresh_latency()
+        return output
+
+    def _worker_loop(self):
+        try:
+            while not self.worker_stop.is_set():
+                self.worker_event.wait(0.1)
+                self.worker_event.clear()
+                while (
+                    not self.worker_stop.is_set()
+                    and self.input_ring.available >= self.block_frame
+                    and self.output_ring.free >= self.block_frame
+                ):
+                    count = self.input_ring.read_into(self.worker_input)
+                    if count != self.block_frame:
+                        break
+                    output = self._process_block(self.worker_input)
+                    if self.worker_stop.is_set():
+                        break
+                    written = self.output_ring.write(output)
+                    if written != self.block_frame:
+                        raise RuntimeError("The real-time output buffer is full.")
+        except Exception:
+            self.running = False
+            self.worker_stop.set()
+            self.error_queue.put_nowait(traceback.format_exc())
+
     def _callback(self, indata, outdata, frames, timing, status):
         try:
+            if not self.running:
+                outdata.fill(0)
+                raise sd.CallbackStop
             if status:
                 self.error_queue.put_nowait(str(status))
-            mono = librosa.to_mono(indata.T).astype(np.float32, copy=False)
-            if mono.shape[0] < self.block_frame:
-                mono = np.pad(mono, (self.block_frame - mono.shape[0], 0))
-            elif mono.shape[0] > self.block_frame:
-                mono = mono[-self.block_frame :]
-            mono = self._gate_silence(mono)
-            self.input_wav[:-self.block_frame] = self.input_wav[
-                self.block_frame:
-            ].clone()
-            self.input_wav[-self.block_frame:] = torch.from_numpy(mono).to(
-                self.rvc.device
-            )
-            self.input_wav_res[:-self.block_frame_16k] = self.input_wav_res[
-                self.block_frame_16k:
-            ].clone()
-            resample_source = self.input_wav[
-                -self.block_frame - 2 * self.zero_crossing :
-            ]
-            resampled = self._resample_input(resample_source)
-            self.input_wav_res[-resampled.shape[0] :] = resampled
-            if self.settings["monitor_input"]:
-                converted = self.input_wav[self.extra_frame :].clone()
-                infer_seconds = 0.0
-            else:
-                converted, infer_seconds = self.rvc.infer(
-                    self.input_wav_res,
-                    self.block_frame_16k,
-                    self.skip_head,
-                    self.return_length,
-                    self.settings["f0_method"],
-                )
-                if self.output_resampler is not None:
-                    converted = self.output_resampler(converted)
-                converted = self._mix_volume(converted)
-            output = self._apply_sola(converted)
-            output = output.repeat(self.channels, 1).t().detach().cpu().numpy()
+            written = self.input_ring.write(indata)
+            if written != frames and not self.input_overflow_reported:
+                self.input_overflow_reported = True
+                self.error_queue.put_nowait("Real-time input buffer overflow.")
             outdata.fill(0)
-            count = min(frames, output.shape[0])
-            outdata[:count] = np.clip(output[:count], -1.0, 1.0)
-            self.last_infer_ms = round(infer_seconds * 1000)
+            if not self.output_primed:
+                if self.output_ring.available >= self.block_frame:
+                    self.prime_frames_remaining -= frames
+                    if self.prime_frames_remaining <= 0:
+                        self.output_primed = True
+                self.worker_event.set()
+                return
+            count = self.output_ring.read_into(outdata)
+            if count != frames and not self.output_underflow_reported:
+                self.output_underflow_reported = True
+                self.error_queue.put_nowait("Real-time output buffer underflow.")
+            self.worker_event.set()
+        except sd.CallbackStop:
+            raise
         except Exception:
             outdata.fill(0)
             self.running = False
+            self.worker_stop.set()
+            self.worker_event.set()
             self.error_queue.put_nowait(traceback.format_exc())
             raise sd.CallbackAbort
 
@@ -375,8 +524,8 @@ class RealtimeGUI:
         self.extra_time = tk.DoubleVar(value=value.get("extra_time", 2.5))
         self.monitor_input = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready")
-        self.latency = tk.StringVar(value="Algorithm latency: 0 ms")
-        self.infer_time = tk.StringVar(value="Inference: 0 ms")
+        self.latency = tk.StringVar(value="Estimated latency: 0 ms")
+        self.infer_time = tk.StringVar(value="Processing: 0 ms (RVC: 0 ms)")
 
     def _build(self):
         root = ttk.Frame(self.root, padding=12)
@@ -633,7 +782,7 @@ class RealtimeGUI:
                 f"{self.engine.sample_rate} Hz"
             )
             self.latency.set(
-                f"Algorithm latency: {self.engine.algorithm_latency_ms} ms"
+                f"Estimated latency: {self.engine.algorithm_latency_ms} ms"
             )
         except Exception as error:
             self.engine.stop()
@@ -660,7 +809,13 @@ class RealtimeGUI:
             self.status.set(str(error))
 
     def _poll(self):
-        self.infer_time.set(f"Inference: {self.engine.last_infer_ms} ms")
+        self.infer_time.set(
+            f"Processing: {self.engine.last_block_ms} ms "
+            f"(RVC: {self.engine.last_infer_ms} ms)"
+        )
+        self.latency.set(
+            f"Estimated latency: {self.engine.algorithm_latency_ms} ms"
+        )
         try:
             while True:
                 error = self.error_queue.get_nowait()

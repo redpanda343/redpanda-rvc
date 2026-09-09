@@ -182,6 +182,7 @@ class RealTimeRVC:
         self.seed = int(seed)
         self.infer_count = 0
         self.last_f0_method = None
+        self.prepared_f0_methods = set()
         self.rmvpe_viterbi = RMVPEViterbi()
         self.cache_pitch = torch.zeros(4096, device=self.device, dtype=torch.long)
         self.cache_pitchf = torch.zeros(
@@ -284,10 +285,28 @@ class RealTimeRVC:
         )
         return features
 
+    def _prepare_pitch_predictor(self, method):
+        predictor = getattr(self.pipeline, f"model_{method}", None)
+        if predictor is None:
+            return
+        current = predictor
+        for _ in range(4):
+            if isinstance(current, torch.nn.Module):
+                current.float()
+            mel_extractor = getattr(current, "mel_extractor", None)
+            if isinstance(mel_extractor, torch.nn.Module):
+                mel_extractor.float()
+            current = getattr(current, "model", None)
+            if current is None:
+                break
+        self.prepared_f0_methods.add(method)
+
     def _update_pitch(self, input_wav, block_frame_16k, method):
         if method != self.last_f0_method:
             self.rmvpe_viterbi.reset()
             self.last_f0_method = method
+        if method not in self.prepared_f0_methods:
+            self._prepare_pitch_predictor(method)
         extractor_frame = block_frame_16k + 800
         if method == "rmvpe":
             extractor_frame = 5120 * ((extractor_frame - 1) // 5120 + 1) - 160
@@ -305,17 +324,8 @@ class RealTimeRVC:
             pitch=self.pitch,
             f0_decoder=decoder,
         )
-        predictor = getattr(self.pipeline, f"model_{method}", None)
-        current = predictor
-        for _ in range(4):
-            if isinstance(current, torch.nn.Module):
-                current.float()
-            mel_extractor = getattr(current, "mel_extractor", None)
-            if isinstance(mel_extractor, torch.nn.Module):
-                mel_extractor.float()
-            current = getattr(current, "model", None)
-            if current is None:
-                break
+        if method not in self.prepared_f0_methods:
+            self._prepare_pitch_predictor(method)
         pitch = torch.as_tensor(pitch, device=self.device, dtype=torch.long).flatten()
         pitchf = torch.as_tensor(
             pitchf, device=self.device, dtype=torch.float32
@@ -369,4 +379,6 @@ class RealTimeRVC:
                     int(return_length),
                 )[0]
                 self.infer_count += 1
+                if torch.device(self.device).type == "cuda":
+                    torch.cuda.synchronize(self.device)
         return audio.squeeze().float(), time.perf_counter() - started
