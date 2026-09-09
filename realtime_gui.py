@@ -43,6 +43,7 @@ class AudioEngine:
             index_rate=settings["index_rate"],
             pitch=settings["pitch"],
             speaker_id=settings["speaker_id"],
+            embedder_model=settings["embedder_model"],
         )
         input_info = sd.query_devices(settings["input_device"])
         output_info = sd.query_devices(settings["output_device"])
@@ -396,6 +397,9 @@ class RealtimeGUI:
         value = self.saved
         self.model_path = tk.StringVar(value=value.get("model_path", ""))
         self.index_path = tk.StringVar(value=value.get("index_path", ""))
+        self.embedder_model = tk.StringVar(
+            value=value.get("embedder_model", "contentvec")
+        )
         self.host_api = tk.StringVar(value=value.get("host_api", ""))
         self.input_device = tk.StringVar(value=value.get("input_device", ""))
         self.output_device = tk.StringVar(value=value.get("output_device", ""))
@@ -444,6 +448,16 @@ class RealtimeGUI:
         ttk.Button(model, text="Browse", command=self._browse_index).grid(
             row=1, column=2, pady=(8, 0)
         )
+        ttk.Label(model, text="Embedder").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        embedders = ttk.Frame(model)
+        embedders.grid(row=2, column=1, columnspan=2, sticky="w", padx=8, pady=(8, 0))
+        for embedder in ("contentvec", "spin-v2"):
+            ttk.Radiobutton(
+                embedders,
+                text=embedder,
+                variable=self.embedder_model,
+                value=embedder,
+            ).pack(side="left", padx=(0, 10))
         model.columnconfigure(1, weight=1)
         devices = ttk.LabelFrame(root, text="Audio devices", padding=10)
         devices.pack(fill="x", pady=(0, 8))
@@ -638,6 +652,7 @@ class RealtimeGUI:
         return {
             "model_path": self.model_path.get().strip(),
             "index_path": index_path,
+            "embedder_model": self.embedder_model.get(),
             "host_api": self.host_api.get(),
             "input_device": self.input_devices[self.input_device.get()],
             "output_device": self.output_devices[self.output_device.get()],

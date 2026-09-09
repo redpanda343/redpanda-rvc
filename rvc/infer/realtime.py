@@ -11,6 +11,7 @@ from rvc.infer.infer import VoiceConverter
 
 
 SUPPORTED_VOCODERS = {"HiFi-GAN", "RefineGAN"}
+SUPPORTED_EMBEDDERS = {"contentvec", "spin-v2"}
 
 
 class RealTimeRVC:
@@ -21,6 +22,7 @@ class RealTimeRVC:
         index_rate=0.0,
         pitch=0,
         speaker_id=0,
+        embedder_model="contentvec",
     ):
         self.converter = VoiceConverter()
         self.converter.get_vc(model_path, speaker_id)
@@ -56,9 +58,20 @@ class RealTimeRVC:
         self.cache_pitchf = torch.zeros(
             4096, device=self.device, dtype=torch.float32
         )
-        expected_embedder = self.converter.cpt.get("embedder_model") or "contentvec"
-        self.embedder_name = expected_embedder
-        self.converter.load_hubert(expected_embedder)
+        expected_embedder = self.converter.cpt.get("embedder_model")
+        if embedder_model not in SUPPORTED_EMBEDDERS:
+            raise ValueError(f"Unsupported embedder model: {embedder_model}")
+        if expected_embedder and expected_embedder not in SUPPORTED_EMBEDDERS:
+            raise ValueError(
+                f"This voice model uses unsupported embedder {expected_embedder}."
+            )
+        if expected_embedder and embedder_model != expected_embedder:
+            raise ValueError(
+                f"This voice model was trained with {expected_embedder}, but "
+                f"{embedder_model} is selected."
+            )
+        self.embedder_name = embedder_model
+        self.converter.load_hubert(embedder_model)
         self.embedder = self.converter.hubert_model.to(
             device=self.device, dtype=torch.float32
         )
@@ -81,6 +94,8 @@ class RealTimeRVC:
                 f"The index has {index.d} channels, but this model expects "
                 f"{self.expected_feature_dim}."
             )
+        if index.ntotal < 1:
+            raise ValueError("The selected feature index is empty.")
         self.index = index
         self.big_npy = index.reconstruct_n(0, index.ntotal)
 
@@ -119,11 +134,13 @@ class RealTimeRVC:
             return features
         start = skip_head // 2
         query = features[0, start:].detach().cpu().numpy().astype("float32")
-        score, indices = self.index.search(query, k=8)
-        if not (indices >= 0).all():
-            raise RuntimeError("The selected index contains invalid neighbors.")
+        score, indices = self.index.search(query, k=min(8, self.index.ntotal))
+        valid = indices >= 0
+        if not valid.any(axis=1).all():
+            raise RuntimeError("The selected index returned no valid neighbors.")
+        indices = np.where(valid, indices, 0)
         score = np.maximum(score, 1e-6)
-        weight = np.square(1.0 / score)
+        weight = np.where(valid, np.square(1.0 / score), 0.0)
         weight /= weight.sum(axis=1, keepdims=True)
         retrieved = np.sum(
             self.big_npy[indices] * np.expand_dims(weight, axis=2), axis=1
