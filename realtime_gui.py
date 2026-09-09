@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from torchaudio.transforms import Resample
 
 from rvc.infer.realtime import RealTimeRVC
-from rvc.infer.spectral_gate import SpectralGate
 
 
 ROOT = Path(__file__).resolve().parent
@@ -98,7 +97,6 @@ class AudioEngine:
             + self.block_frame
         )
         self.input_wav = torch.zeros(total_input, device=device, dtype=torch.float32)
-        self.input_wav_denoise = self.input_wav.clone()
         self.input_wav_res = torch.zeros(
             160 * total_input // self.zero_crossing,
             device=device,
@@ -110,8 +108,6 @@ class AudioEngine:
         self.sola_den_kernel = torch.ones(
             1, 1, self.sola_buffer_frame, device=device, dtype=torch.float32
         )
-        self.noise_buffer = self.sola_buffer.clone()
-        self.output_buffer = self.input_wav.clone()
         self.skip_head = self.extra_frame // self.zero_crossing
         self.return_length = (
             self.block_frame + self.sola_buffer_frame + self.sola_search_frame
@@ -137,9 +133,6 @@ class AudioEngine:
                 new_freq=stream_rate,
                 dtype=torch.float32,
             ).to(device)
-        self.spectral_gate = SpectralGate(
-            stream_rate, 4 * self.zero_crossing, prop_decrease=0.9
-        ).to(device)
         extra_settings = None
         if settings["wasapi_exclusive"] and "WASAPI" in settings["host_api"]:
             extra_settings = sd.WasapiSettings(exclusive=True)
@@ -222,11 +215,7 @@ class AudioEngine:
         rate = self.settings["rms_mix_rate"]
         if rate >= 1:
             return converted
-        source = (
-            self.input_wav_denoise[self.extra_frame :]
-            if self.settings["input_noise_reduction"]
-            else self.input_wav[self.extra_frame :]
-        )
+        source = self.input_wav[self.extra_frame :]
         source = source[: converted.shape[0]]
         rms_source = librosa.feature.rms(
             y=source.detach().cpu().numpy(),
@@ -296,39 +285,13 @@ class AudioEngine:
             self.input_wav_res[:-self.block_frame_16k] = self.input_wav_res[
                 self.block_frame_16k:
             ].clone()
-            if self.settings["input_noise_reduction"]:
-                self.input_wav_denoise[:-self.block_frame] = self.input_wav_denoise[
-                    self.block_frame:
-                ].clone()
-                source = self.input_wav[
-                    -self.sola_buffer_frame - self.block_frame :
-                ]
-                denoised = self.spectral_gate(
-                    source.unsqueeze(0), self.input_wav.unsqueeze(0)
-                ).squeeze(0)
-                denoised[: self.sola_buffer_frame] *= self.fade_in
-                denoised[: self.sola_buffer_frame] += self.noise_buffer * self.fade_out
-                self.input_wav_denoise[-self.block_frame:] = denoised[
-                    : self.block_frame
-                ]
-                self.noise_buffer[:] = denoised[
-                    self.block_frame : self.block_frame + self.sola_buffer_frame
-                ]
-                resample_source = self.input_wav_denoise[
-                    -self.block_frame - 2 * self.zero_crossing :
-                ]
-            else:
-                resample_source = self.input_wav[
-                    -self.block_frame - 2 * self.zero_crossing :
-                ]
+            resample_source = self.input_wav[
+                -self.block_frame - 2 * self.zero_crossing :
+            ]
             resampled = self._resample_input(resample_source)
             self.input_wav_res[-resampled.shape[0] :] = resampled
             if self.settings["monitor_input"]:
-                converted = (
-                    self.input_wav_denoise[self.extra_frame :].clone()
-                    if self.settings["input_noise_reduction"]
-                    else self.input_wav[self.extra_frame :].clone()
-                )
+                converted = self.input_wav[self.extra_frame :].clone()
                 infer_seconds = 0.0
             else:
                 converted, infer_seconds = self.rvc.infer(
@@ -340,14 +303,6 @@ class AudioEngine:
                 )
                 if self.output_resampler is not None:
                     converted = self.output_resampler(converted)
-                if self.settings["output_noise_reduction"]:
-                    self.output_buffer[:-self.block_frame] = self.output_buffer[
-                        self.block_frame:
-                    ].clone()
-                    self.output_buffer[-self.block_frame:] = converted[-self.block_frame:]
-                    converted = self.spectral_gate(
-                        converted.unsqueeze(0), self.output_buffer.unsqueeze(0)
-                    ).squeeze(0)
                 converted = self._mix_volume(converted)
             output = self._apply_sola(converted)
             output = output.repeat(self.channels, 1).t().detach().cpu().numpy()
@@ -381,8 +336,6 @@ class RealtimeGUI:
         self.rms_mix_rate.trace_add("write", self._hot_update)
         self.threshold.trace_add("write", self._hot_update)
         self.f0_method.trace_add("write", self._hot_update)
-        self.input_noise_reduction.trace_add("write", self._hot_update)
-        self.output_noise_reduction.trace_add("write", self._hot_update)
         self.monitor_input.trace_add("write", self._hot_update)
         self.root.after(100, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
@@ -420,12 +373,6 @@ class RealtimeGUI:
             value=value.get("crossfade_time", 0.05)
         )
         self.extra_time = tk.DoubleVar(value=value.get("extra_time", 2.5))
-        self.input_noise_reduction = tk.BooleanVar(
-            value=value.get("input_noise_reduction", False)
-        )
-        self.output_noise_reduction = tk.BooleanVar(
-            value=value.get("output_noise_reduction", False)
-        )
         self.monitor_input = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready")
         self.latency = tk.StringVar(value="Algorithm latency: 0 ms")
@@ -524,19 +471,9 @@ class RealtimeGUI:
         toggles.grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(
             toggles,
-            text="Input noise reduction",
-            variable=self.input_noise_reduction,
-        ).pack(side="left")
-        ttk.Checkbutton(
-            toggles,
-            text="Output noise reduction",
-            variable=self.output_noise_reduction,
-        ).pack(side="left", padx=(12, 0))
-        ttk.Checkbutton(
-            toggles,
             text="Monitor input",
             variable=self.monitor_input,
-        ).pack(side="left", padx=(12, 0))
+        ).pack(side="left")
         settings.columnconfigure(1, weight=1)
         actions = ttk.Frame(root)
         actions.pack(fill="x")
@@ -669,8 +606,6 @@ class RealtimeGUI:
             "block_time": self.block_time.get(),
             "crossfade_time": self.crossfade_time.get(),
             "extra_time": self.extra_time.get(),
-            "input_noise_reduction": self.input_noise_reduction.get(),
-            "output_noise_reduction": self.output_noise_reduction.get(),
             "monitor_input": self.monitor_input.get(),
         }
 
@@ -720,12 +655,6 @@ class RealtimeGUI:
             self.engine.settings["rms_mix_rate"] = self.rms_mix_rate.get()
             self.engine.settings["threshold"] = self.threshold.get()
             self.engine.settings["f0_method"] = self.f0_method.get()
-            self.engine.settings["input_noise_reduction"] = (
-                self.input_noise_reduction.get()
-            )
-            self.engine.settings["output_noise_reduction"] = (
-                self.output_noise_reduction.get()
-            )
             self.engine.settings["monitor_input"] = self.monitor_input.get()
         except (tk.TclError, ValueError) as error:
             self.status.set(str(error))

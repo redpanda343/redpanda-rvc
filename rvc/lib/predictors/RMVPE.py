@@ -459,7 +459,7 @@ class RMVPE0Predictor:
             hidden = self.model(mel)
         return hidden[:, :n_frames]
 
-    def decode(self, hidden, thred=0.03):
+    def decode(self, hidden, thred=0.03, center=None):
         """
         Decodes hidden representation to F0.
 
@@ -467,12 +467,14 @@ class RMVPE0Predictor:
             hidden (np.ndarray): Hidden representation.
             thred (float, optional): Threshold for salience. Defaults to 0.03.
         """
-        cents_pred = self.to_local_average_cents(hidden, thred=thred)
+        cents_pred = self.to_local_average_cents(
+            hidden, thred=thred, center=center
+        )
         f0 = 10 * (2 ** (cents_pred / 1200))
         f0[f0 == 10] = 0
         return f0
 
-    def infer_from_audio(self, audio, thred=0.03):
+    def infer_from_audio(self, audio, thred=0.03, decoder=None):
         """
         Infers F0 from audio.
 
@@ -484,10 +486,11 @@ class RMVPE0Predictor:
         mel = self.mel_extractor(audio, center=True)
         hidden = self.mel2hidden(mel)
         hidden = hidden.squeeze(0).cpu().numpy()
-        f0 = self.decode(hidden, thred=thred)
+        center = decoder(hidden, thred) if decoder is not None else None
+        f0 = self.decode(hidden, thred=thred, center=center)
         return f0
 
-    def to_local_average_cents(self, salience, thred=0.05):
+    def to_local_average_cents(self, salience, thred=0.05, center=None):
         """
         Converts salience to local average cents.
 
@@ -495,7 +498,13 @@ class RMVPE0Predictor:
             salience (np.ndarray): Salience values.
             thred (float, optional): Threshold for salience. Defaults to 0.05.
         """
-        center = np.argmax(salience, axis=1)
+        if center is None:
+            center = np.argmax(salience, axis=1)
+        else:
+            center = np.asarray(center, dtype=np.int64)
+            if center.shape != (salience.shape[0],):
+                raise ValueError("Pitch decoder returned an invalid shape.")
+            center = np.clip(center, 0, salience.shape[1] - 1)
         salience = np.pad(salience, ((0, 0), (4, 4)))
         center += 4
         todo_salience = []

@@ -16,8 +16,10 @@ class RMVPE:
             device=self.device,
         )
 
-    def get_f0(self, x, filter_radius=0.03):
-        f0 = self.model.infer_from_audio(x, thred=filter_radius)
+    def get_f0(self, x, filter_radius=0.03, decoder=None):
+        f0 = self.model.infer_from_audio(
+            x, thred=filter_radius, decoder=decoder
+        )
         return f0
 
 

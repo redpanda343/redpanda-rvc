@@ -14,6 +14,69 @@ SUPPORTED_VOCODERS = {"HiFi-GAN", "RefineGAN"}
 SUPPORTED_EMBEDDERS = {"contentvec", "spin-v2"}
 
 
+class RMVPEViterbi:
+    def __init__(self, max_jump_bins=12):
+        self.max_jump_bins = int(max_jump_bins)
+        self.state_count = 0
+        self.predecessors = None
+        self.log_transition = None
+        self.state_indices = None
+
+    def _prepare(self, state_count):
+        if state_count == self.state_count:
+            return
+        offsets = np.arange(
+            -self.max_jump_bins, self.max_jump_bins + 1, dtype=np.int32
+        )
+        weights = (self.max_jump_bins + 1 - np.abs(offsets)).astype(np.float32)
+        source = np.arange(state_count, dtype=np.int32)[:, None]
+        targets = source + offsets[None, :]
+        source_valid = (targets >= 0) & (targets < state_count)
+        row_sums = np.sum(weights[None, :] * source_valid, axis=1)
+        destination = np.arange(state_count, dtype=np.int32)[:, None]
+        predecessors = destination + offsets[None, :]
+        valid = (predecessors >= 0) & (predecessors < state_count)
+        safe_predecessors = np.clip(predecessors, 0, state_count - 1)
+        log_transition = np.log(weights[None, :]) - np.log(
+            row_sums[safe_predecessors]
+        )
+        log_transition[~valid] = -np.inf
+        self.state_count = state_count
+        self.predecessors = safe_predecessors
+        self.log_transition = log_transition.astype(np.float32)
+        self.state_indices = np.arange(state_count)
+
+    def _decode_segment(self, salience):
+        frame_count, state_count = salience.shape
+        self._prepare(state_count)
+        emissions = np.log(np.maximum(salience, np.finfo(np.float32).tiny))
+        score = emissions[0].copy()
+        back = np.empty((frame_count, state_count), dtype=np.int16)
+        for frame in range(1, frame_count):
+            candidates = score[self.predecessors] + self.log_transition
+            choices = np.argmax(candidates, axis=1)
+            previous = self.predecessors[self.state_indices, choices]
+            score = candidates[self.state_indices, choices] + emissions[frame]
+            back[frame] = previous
+        path = np.empty(frame_count, dtype=np.int64)
+        path[-1] = int(np.argmax(score))
+        for frame in range(frame_count - 1, 0, -1):
+            path[frame - 1] = back[frame, path[frame]]
+        return path
+
+    def decode(self, salience, threshold):
+        salience = np.asarray(salience, dtype=np.float32)
+        centers = np.argmax(salience, axis=1).astype(np.int64)
+        voiced = np.max(salience, axis=1) > threshold
+        changes = np.flatnonzero(
+            np.diff(np.concatenate(([False], voiced, [False])).astype(np.int8))
+        ).reshape(-1, 2)
+        for start, end in changes:
+            if end - start > 1:
+                centers[start:end] = self._decode_segment(salience[start:end])
+        return centers
+
+
 class RealTimeRVC:
     def __init__(
         self,
@@ -54,6 +117,7 @@ class RealTimeRVC:
         self.big_npy = None
         self.lock = threading.RLock()
         self.infer_count = 0
+        self.rmvpe_viterbi = RMVPEViterbi()
         self.cache_pitch = torch.zeros(4096, device=self.device, dtype=torch.long)
         self.cache_pitchf = torch.zeros(
             4096, device=self.device, dtype=torch.float32
@@ -162,6 +226,9 @@ class RealTimeRVC:
             source.shape[0] // 160,
             f0_method=method,
             pitch=self.pitch,
+            f0_decoder=(
+                self.rmvpe_viterbi.decode if method == "rmvpe" else None
+            ),
         )
         predictor = getattr(self.pipeline, f"model_{method}", None)
         current = predictor

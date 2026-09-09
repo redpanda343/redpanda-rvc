@@ -82,6 +82,7 @@ class Pipeline:
         p_len,
         f0_method: str = "rmvpe",
         pitch: int = 0,
+        f0_decoder=None,
     ):
         """
         Estimates the fundamental frequency (F0) of a given audio signal using various methods.
@@ -109,7 +110,9 @@ class Pipeline:
                     sample_rate=self.sample_rate,
                     hop_size=self.window,
                 )
-            f0 = self.model_rmvpe.get_f0(x, filter_radius=0.03)
+            f0 = self.model_rmvpe.get_f0(
+                x, filter_radius=0.03, decoder=f0_decoder
+            )
         elif f0_method == "fcpe":
             if not hasattr(self, "model_fcpe"):
                 self.model_fcpe = FCPE(
