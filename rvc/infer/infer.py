@@ -91,15 +91,21 @@ def _deterministic_torch(enabled):
         torch.backends.cudnn.allow_tf32 = cudnn_allow_tf32
 
 
+@contextmanager
+def deterministic_torch_scope(enabled=True):
+    with _DETERMINISTIC_INFERENCE_LOCK:
+        with _deterministic_torch(enabled):
+            yield
+
+
 def deterministic_inference(func):
     signature = inspect.signature(func)
 
     @wraps(func)
     def wrapper(*args, **kwargs):
         seed = signature.bind_partial(*args, **kwargs).arguments.get("seed")
-        with _DETERMINISTIC_INFERENCE_LOCK:
-            with _deterministic_torch(seed is not None):
-                return func(*args, **kwargs)
+        with deterministic_torch_scope(seed is not None):
+            return func(*args, **kwargs)
 
     return wrapper
 

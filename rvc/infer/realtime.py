@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rvc.infer.infer import VoiceConverter
+from rvc.infer.infer import VoiceConverter, deterministic_torch_scope
 
 
 SUPPORTED_VOCODERS = {"HiFi-GAN", "RefineGAN"}
@@ -15,20 +15,47 @@ SUPPORTED_EMBEDDERS = {"contentvec", "spin-v2"}
 
 
 class RMVPEViterbi:
-    def __init__(self, max_jump_bins=12):
+    def __init__(
+        self,
+        max_jump_bins=12,
+        transition_scale_bins=6.0,
+        octave_jump_penalty=4.0,
+        bridge_frames=2,
+    ):
         self.max_jump_bins = int(max_jump_bins)
+        self.transition_scale_bins = float(transition_scale_bins)
+        self.octave_jump_penalty = float(octave_jump_penalty)
+        self.bridge_frames = int(bridge_frames)
         self.state_count = 0
         self.predecessors = None
         self.log_transition = None
         self.state_indices = None
+        self.previous_path = None
+        self.previous_tracking_voiced = None
+
+    def reset(self):
+        self.previous_path = None
+        self.previous_tracking_voiced = None
 
     def _prepare(self, state_count):
         if state_count == self.state_count:
             return
-        offsets = np.arange(
-            -self.max_jump_bins, self.max_jump_bins + 1, dtype=np.int32
+        offsets = np.unique(
+            np.concatenate(
+                (
+                    np.arange(
+                        -self.max_jump_bins,
+                        self.max_jump_bins + 1,
+                        dtype=np.int32,
+                    ),
+                    np.array([-60, 60], dtype=np.int32),
+                )
+            )
         )
-        weights = (self.max_jump_bins + 1 - np.abs(offsets)).astype(np.float32)
+        distances = np.abs(offsets).astype(np.float32)
+        costs = distances / self.transition_scale_bins
+        costs += self.octave_jump_penalty * (distances == 60.0)
+        weights = np.exp(-costs).astype(np.float32)
         source = np.arange(state_count, dtype=np.int32)[:, None]
         targets = source + offsets[None, :]
         source_valid = (targets >= 0) & (targets < state_count)
@@ -46,11 +73,15 @@ class RMVPEViterbi:
         self.log_transition = log_transition.astype(np.float32)
         self.state_indices = np.arange(state_count)
 
-    def _decode_segment(self, salience):
+    def _decode_segment(self, salience, initial_center=None):
         frame_count, state_count = salience.shape
         self._prepare(state_count)
         emissions = np.log(np.maximum(salience, np.finfo(np.float32).tiny))
         score = emissions[0].copy()
+        if initial_center is not None:
+            distances = np.abs(self.state_indices - int(initial_center))
+            score -= distances / self.transition_scale_bins
+            score -= self.octave_jump_penalty * (distances == 60)
         back = np.empty((frame_count, state_count), dtype=np.int16)
         for frame in range(1, frame_count):
             candidates = score[self.predecessors] + self.log_transition
@@ -64,16 +95,47 @@ class RMVPEViterbi:
             path[frame - 1] = back[frame, path[frame]]
         return path
 
-    def decode(self, salience, threshold):
-        salience = np.asarray(salience, dtype=np.float32)
-        centers = np.argmax(salience, axis=1).astype(np.int64)
-        voiced = np.max(salience, axis=1) > threshold
+    def _tracking_mask(self, voiced, previous_voiced):
+        tracking = voiced.copy()
+        unvoiced = ~voiced
         changes = np.flatnonzero(
-            np.diff(np.concatenate(([False], voiced, [False])).astype(np.int8))
+            np.diff(np.concatenate(([False], unvoiced, [False])).astype(np.int8))
         ).reshape(-1, 2)
         for start, end in changes:
-            if end - start > 1:
-                centers[start:end] = self._decode_segment(salience[start:end])
+            left_voiced = voiced[start - 1] if start else previous_voiced
+            right_voiced = voiced[end] if end < voiced.size else left_voiced
+            if end - start <= self.bridge_frames and left_voiced and right_voiced:
+                tracking[start:end] = True
+        return tracking
+
+    def decode(self, salience, threshold, advance_frames=0):
+        salience = np.asarray(salience, dtype=np.float32)
+        if salience.ndim != 2 or salience.shape[0] == 0 or salience.shape[1] == 0:
+            raise ValueError("RMVPE salience must contain frames and pitch bins.")
+        centers = np.argmax(salience, axis=1).astype(np.int64)
+        voiced = np.max(salience, axis=1) > threshold
+        initial_center = None
+        previous_voiced = False
+        if self.previous_path is not None:
+            previous_index = min(
+                max(int(advance_frames), 0), self.previous_path.shape[0] - 1
+            )
+            previous_voiced = bool(self.previous_tracking_voiced[previous_index])
+            if previous_voiced:
+                initial_center = int(self.previous_path[previous_index])
+        tracking_voiced = self._tracking_mask(voiced, previous_voiced)
+        changes = np.flatnonzero(
+            np.diff(
+                np.concatenate(([False], tracking_voiced, [False])).astype(np.int8)
+            )
+        ).reshape(-1, 2)
+        for start, end in changes:
+            segment_initial = initial_center if start == 0 else None
+            centers[start:end] = self._decode_segment(
+                salience[start:end], segment_initial
+            )
+        self.previous_path = centers.copy()
+        self.previous_tracking_voiced = tracking_voiced.copy()
         return centers
 
 
@@ -86,6 +148,7 @@ class RealTimeRVC:
         pitch=0,
         speaker_id=0,
         embedder_model="contentvec",
+        seed=0,
     ):
         self.converter = VoiceConverter()
         self.converter.get_vc(model_path, speaker_id)
@@ -116,7 +179,9 @@ class RealTimeRVC:
         self.index = None
         self.big_npy = None
         self.lock = threading.RLock()
+        self.seed = int(seed)
         self.infer_count = 0
+        self.last_f0_method = None
         self.rmvpe_viterbi = RMVPEViterbi()
         self.cache_pitch = torch.zeros(4096, device=self.device, dtype=torch.long)
         self.cache_pitchf = torch.zeros(
@@ -177,6 +242,9 @@ class RealTimeRVC:
     def reset_caches(self):
         self.cache_pitch.zero_()
         self.cache_pitchf.zero_()
+        self.rmvpe_viterbi.reset()
+        self.last_f0_method = None
+        self.infer_count = 0
 
     def _extract_features(self, input_wav):
         source = input_wav.float().view(1, -1)
@@ -217,18 +285,25 @@ class RealTimeRVC:
         return features
 
     def _update_pitch(self, input_wav, block_frame_16k, method):
+        if method != self.last_f0_method:
+            self.rmvpe_viterbi.reset()
+            self.last_f0_method = method
         extractor_frame = block_frame_16k + 800
         if method == "rmvpe":
             extractor_frame = 5120 * ((extractor_frame - 1) // 5120 + 1) - 160
         source = input_wav[-extractor_frame:].detach().cpu().numpy()
+        shift = max(1, block_frame_16k // 160)
+        decoder = None
+        if method == "rmvpe":
+            decoder = lambda salience, threshold: self.rmvpe_viterbi.decode(
+                salience, threshold, shift
+            )
         pitch, pitchf = self.pipeline.get_f0(
             source,
             source.shape[0] // 160,
             f0_method=method,
             pitch=self.pitch,
-            f0_decoder=(
-                self.rmvpe_viterbi.decode if method == "rmvpe" else None
-            ),
+            f0_decoder=decoder,
         )
         predictor = getattr(self.pipeline, f"model_{method}", None)
         current = predictor
@@ -245,7 +320,6 @@ class RealTimeRVC:
         pitchf = torch.as_tensor(
             pitchf, device=self.device, dtype=torch.float32
         ).flatten()
-        shift = max(1, block_frame_16k // 160)
         self.cache_pitch[:-shift] = self.cache_pitch[shift:].clone()
         self.cache_pitchf[:-shift] = self.cache_pitchf[shift:].clone()
         usable_pitch = pitch[3:-1] if pitch.numel() > 4 else pitch
@@ -265,29 +339,34 @@ class RealTimeRVC:
         f0_method,
     ):
         started = time.perf_counter()
-        with self.lock:
-            features = self._extract_features(input_wav)
-            features = self._apply_index(features, skip_head)
-            p_len = min(input_wav.shape[0] // 160, features.shape[1] * 2)
-            self._update_pitch(input_wav, block_frame_16k, f0_method)
-            features = F.interpolate(
-                features.permute(0, 2, 1), scale_factor=2
-            ).permute(0, 2, 1)
-            features = features[:, :p_len]
-            lengths = torch.tensor([p_len], device=self.device, dtype=torch.long)
-            speaker = torch.tensor(
-                [self.speaker_id], device=self.device, dtype=torch.long
-            )
-            coarse = self.cache_pitch[None, -p_len:]
-            continuous = self.cache_pitchf[None, -p_len:]
-            audio = self.model.infer(
-                features.float(),
-                lengths,
-                coarse,
-                continuous,
-                speaker,
-                int(skip_head),
-                int(return_length),
-            )[0]
-        self.infer_count += 1
+        with deterministic_torch_scope():
+            with self.lock:
+                chunk_seed = (self.seed + self.infer_count) % (2**63 - 1)
+                torch.manual_seed(chunk_seed)
+                features = self._extract_features(input_wav)
+                features = self._apply_index(features, skip_head)
+                p_len = min(input_wav.shape[0] // 160, features.shape[1] * 2)
+                self._update_pitch(input_wav, block_frame_16k, f0_method)
+                features = F.interpolate(
+                    features.permute(0, 2, 1), scale_factor=2
+                ).permute(0, 2, 1)
+                features = features[:, :p_len]
+                lengths = torch.tensor(
+                    [p_len], device=self.device, dtype=torch.long
+                )
+                speaker = torch.tensor(
+                    [self.speaker_id], device=self.device, dtype=torch.long
+                )
+                coarse = self.cache_pitch[None, -p_len:]
+                continuous = self.cache_pitchf[None, -p_len:]
+                audio = self.model.infer(
+                    features.float(),
+                    lengths,
+                    coarse,
+                    continuous,
+                    speaker,
+                    int(skip_head),
+                    int(return_length),
+                )[0]
+                self.infer_count += 1
         return audio.squeeze().float(), time.perf_counter() - started
