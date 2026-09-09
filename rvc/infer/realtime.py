@@ -179,8 +179,7 @@ class RealTimeRVC:
         self.index = None
         self.big_npy = None
         self.lock = threading.RLock()
-        self.seed = int(seed)
-        self.infer_count = 0
+        self.seed = int(seed) % (2**63 - 1)
         self.last_f0_method = None
         self.prepared_f0_methods = set()
         self.rmvpe_viterbi = RMVPEViterbi()
@@ -245,7 +244,6 @@ class RealTimeRVC:
         self.cache_pitchf.zero_()
         self.rmvpe_viterbi.reset()
         self.last_f0_method = None
-        self.infer_count = 0
 
     def _extract_features(self, input_wav):
         source = input_wav.float().view(1, -1)
@@ -351,8 +349,7 @@ class RealTimeRVC:
         started = time.perf_counter()
         with deterministic_torch_scope():
             with self.lock:
-                chunk_seed = (self.seed + self.infer_count) % (2**63 - 1)
-                torch.manual_seed(chunk_seed)
+                torch.manual_seed(self.seed)
                 features = self._extract_features(input_wav)
                 features = self._apply_index(features, skip_head)
                 p_len = min(input_wav.shape[0] // 160, features.shape[1] * 2)
@@ -378,7 +375,6 @@ class RealTimeRVC:
                     int(skip_head),
                     int(return_length),
                 )[0]
-                self.infer_count += 1
                 if torch.device(self.device).type == "cuda":
                     torch.cuda.synchronize(self.device)
         return audio.squeeze().float(), time.perf_counter() - started
