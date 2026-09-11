@@ -1,9 +1,6 @@
-from contextlib import nullcontext
-
 import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from torch.nn.utils import parametrize
 from torch.nn.utils.parametrizations import spectral_norm, weight_norm
 
 from rvc.lib.algorithm.commons import get_padding
@@ -42,7 +39,6 @@ class MultiPeriodDiscriminator(torch.nn.Module):
             periods = [2, 3, 5, 7, 11]
             resolutions = [[1024, 120, 600], [2048, 240, 1200], [512, 50, 240]]
 
-        self.use_spectral_norm = use_spectral_norm
         self.checkpointing = checkpointing
         self.discriminators = torch.nn.ModuleList(
             [DiscriminatorS(use_spectral_norm=use_spectral_norm)]
@@ -53,42 +49,19 @@ class MultiPeriodDiscriminator(torch.nn.Module):
             ]
         )
 
-    def forward(self, y, y_hat, combine_inputs: bool = False):
+    def forward(self, y, y_hat):
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
-        combined = None
-        split_sizes = None
-        if combine_inputs and not self.use_spectral_norm:
-            combined = torch.cat((y, y_hat), dim=0)
-            split_sizes = (y.shape[0], y_hat.shape[0])
-
-        cache_context = (
-            nullcontext() if self.use_spectral_norm else parametrize.cached()
-        )
-        with cache_context:
-            for d in self.discriminators:
-                if combined is not None:
-                    if self.training and self.checkpointing:
-                        y_d, fmap = checkpoint(d, combined, use_reentrant=False)
-                    else:
-                        y_d, fmap = d(combined)
-                    y_d_r, y_d_g = torch.split(y_d, split_sizes, dim=0)
-                    fmap_r, fmap_g = [], []
-                    for feature in fmap:
-                        feature_r, feature_g = torch.split(
-                            feature, split_sizes, dim=0
-                        )
-                        fmap_r.append(feature_r)
-                        fmap_g.append(feature_g)
-                elif self.training and self.checkpointing:
-                    y_d_r, fmap_r = checkpoint(d, y, use_reentrant=False)
-                    y_d_g, fmap_g = checkpoint(d, y_hat, use_reentrant=False)
-                else:
-                    y_d_r, fmap_r = d(y)
-                    y_d_g, fmap_g = d(y_hat)
-                y_d_rs.append(y_d_r)
-                y_d_gs.append(y_d_g)
-                fmap_rs.append(fmap_r)
-                fmap_gs.append(fmap_g)
+        for d in self.discriminators:
+            if self.training and self.checkpointing:
+                y_d_r, fmap_r = checkpoint(d, y, use_reentrant=False)
+                y_d_g, fmap_g = checkpoint(d, y_hat, use_reentrant=False)
+            else:
+                y_d_r, fmap_r = d(y)
+                y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
