@@ -1109,9 +1109,7 @@ def train_and_evaluate(
                 with torch.amp.autocast(
                     device_type="cuda", enabled=use_amp, dtype=train_dtype
                 ):
-                    y_d_hat_r, y_d_hat_g, _, _ = net_d(
-                        wave, y_hat.detach(), combine_inputs=True
-                    )
+                    y_d_hat_r, y_d_hat_g, _, _ = net_d(wave, y_hat.detach())
                 loss_disc, _, _ = discriminator_loss(y_d_hat_r, y_d_hat_g)
                 # Discriminator backward and update
                 optim_d.zero_grad()
