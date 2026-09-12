@@ -77,17 +77,19 @@ def write_training_audio(
     dataset_format: str,
 ):
     """Write a processed training slice without changing the existing WAV path."""
+    audio = np.asarray(audio, dtype=np.float32)
+    if not np.all(np.isfinite(audio)):
+        raise ValueError(
+            f"Cannot write non-finite audio samples to {stem}.{dataset_format}"
+        )
     if dataset_format == "wav":
         wavfile.write(
             os.path.join(directory, f"{stem}.wav"),
             sample_rate,
-            audio.astype(np.float32),
+            (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16),
         )
         return
 
-    audio = np.asarray(audio, dtype=np.float32)
-    if not np.all(np.isfinite(audio)):
-        raise ValueError(f"Cannot write non-finite audio samples to {stem}.flac")
     sf.write(
         os.path.join(directory, f"{stem}.flac"),
         np.clip(audio, -1.0, 1.0),
