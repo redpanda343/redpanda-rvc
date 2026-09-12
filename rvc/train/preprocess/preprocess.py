@@ -100,35 +100,6 @@ def write_training_audio(
     )
 
 
-def write_training_audio_pair(
-    gt_wavs_dir: str,
-    wavs16k_dir: str,
-    stem: str,
-    sample_rate: int,
-    audio: np.ndarray,
-    dataset_format: str,
-):
-    write_training_audio(
-        gt_wavs_dir,
-        stem,
-        sample_rate,
-        audio,
-        dataset_format,
-    )
-    audio_16k = librosa.resample(
-        audio,
-        orig_sr=sample_rate,
-        target_sr=SAMPLE_RATE_16K,
-    )
-    write_training_audio(
-        wavs16k_dir,
-        stem,
-        SAMPLE_RATE_16K,
-        audio_16k,
-        dataset_format,
-    )
-
-
 class BoundedAudioWriter:
     def __init__(self, max_workers: int):
         self.max_workers = max(1, int(max_workers))
@@ -139,12 +110,24 @@ class BoundedAudioWriter:
             else None
         )
         self.pending = set()
+        self.skipped_short = 0
 
-    def submit(self, *args):
+    def submit(
+        self,
+        directory: str,
+        stem: str,
+        sample_rate: int,
+        audio: np.ndarray,
+        dataset_format: str,
+    ):
+        if len(audio) < round(sample_rate * MINIMUM_OUTPUT_AUDIO_SECONDS):
+            self.skipped_short += 1
+            return 1
+        args = (directory, stem, sample_rate, audio, dataset_format)
         if self.executor is None:
-            write_training_audio_pair(*args)
-            return
-        self.pending.add(self.executor.submit(write_training_audio_pair, *args))
+            write_training_audio(*args)
+            return 0
+        self.pending.add(self.executor.submit(write_training_audio, *args))
         if len(self.pending) >= self.max_pending:
             done, self.pending = concurrent.futures.wait(
                 self.pending,
@@ -152,6 +135,7 @@ class BoundedAudioWriter:
             )
             for future in done:
                 future.result()
+        return 0
 
     def close(self):
         if self.executor is None:
@@ -218,42 +202,6 @@ def clear_simple_preprocess_artifacts(exp_dir: str):
     filelist_path = os.path.join(exp_dir, "filelist.txt")
     if os.path.isfile(filelist_path):
         os.remove(filelist_path)
-
-
-def remove_short_output_audio(exp_dir: str):
-    directory_names = ("sliced_audios", "sliced_audios_16k")
-    short_stems = set()
-    for directory_name in directory_names:
-        directory = os.path.join(exp_dir, directory_name)
-        if not os.path.isdir(directory):
-            continue
-        for filename in os.listdir(directory):
-            if not filename.lower().endswith((".wav", ".flac")):
-                continue
-            path = os.path.join(directory, filename)
-            try:
-                info = sf.info(path)
-            except (OSError, RuntimeError):
-                continue
-            if info.frames < round(info.samplerate * MINIMUM_OUTPUT_AUDIO_SECONDS):
-                short_stems.add(os.path.splitext(filename)[0])
-
-    for directory_name in directory_names:
-        directory = os.path.join(exp_dir, directory_name)
-        if not os.path.isdir(directory):
-            continue
-        for filename in os.listdir(directory):
-            if (
-                filename.lower().endswith((".wav", ".flac"))
-                and os.path.splitext(filename)[0] in short_stems
-            ):
-                os.remove(os.path.join(directory, filename))
-
-    for stem in short_stems:
-        spec_path = os.path.join(exp_dir, "sliced_audios", f"{stem}.spec.pt")
-        if os.path.isfile(spec_path):
-            os.remove(spec_path)
-    return len(short_stems)
 
 
 def _ffmpeg_path():
@@ -578,9 +526,7 @@ class PreProcess:
         self.dataset_format = normalize_dataset_format(dataset_format)
         self.audio_write_workers = 1
         self.gt_wavs_dir = os.path.join(exp_dir, "sliced_audios")
-        self.wavs16k_dir = os.path.join(exp_dir, "sliced_audios_16k")
         os.makedirs(self.gt_wavs_dir, exist_ok=True)
-        os.makedirs(self.wavs16k_dir, exist_ok=True)
 
     def _normalize_audio(self, audio: np.ndarray):
         tmp_max = np.abs(audio).max()
@@ -631,16 +577,19 @@ class PreProcess:
             )
         args = (
             self.gt_wavs_dir,
-            self.wavs16k_dir,
             f"{sid}_{idx0}_{idx1}",
             self.sr,
             normalized_audio,
             self.dataset_format,
         )
         if writer is None:
-            write_training_audio_pair(*args)
-        else:
-            writer.submit(*args)
+            if len(normalized_audio) < round(
+                self.sr * MINIMUM_OUTPUT_AUDIO_SECONDS
+            ):
+                return 1
+            write_training_audio(*args)
+            return 0
+        return writer.submit(*args)
 
     def simple_cut(
         self,
@@ -663,13 +612,13 @@ class PreProcess:
                 if len(chunk) == chunk_length:
                     writer.submit(
                         self.gt_wavs_dir,
-                        self.wavs16k_dir,
                         f"{sid}_{idx0}_{i // (chunk_length - overlap_length)}",
                         self.sr,
                         chunk,
                         self.dataset_format,
                     )
                 i += chunk_length - overlap_length
+        return writer.skipped_short
 
     def process_simple_audio(
         self,
@@ -712,7 +661,7 @@ class PreProcess:
         normalization_gain = 1.0
         if normalization_mode == "post" and audio is not None:
             normalization_gain = self._detect_post_normalization_gain(audio)
-        self.simple_cut(
+        skipped_short = self.simple_cut(
             audio,
             sid,
             idx0,
@@ -721,7 +670,7 @@ class PreProcess:
             normalization_mode,
             normalization_gain,
         )
-        return audio_length
+        return audio_length, skipped_short
 
     def _prepare_audio(
         self,
@@ -885,10 +834,10 @@ class PreProcess:
     ):
         intervals, duration_s, voice_peak = self._detect_automatic_intervals(path)
         if duration_s < MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS:
-            return 0.0
+            return 0.0, 0
         if not intervals:
             print(f"No speech or singing detected in: {path}")
-            return duration_s
+            return duration_s, 0
 
         ranges = self._automatic_clip_ranges(intervals)
         normalization_gain = self._post_normalization_gain(voice_peak)
@@ -937,7 +886,7 @@ class PreProcess:
                                 writer,
                             )
                         idx1 += 1
-        return duration_s
+        return duration_s, writer.skipped_short
 
     def process_audio(
         self,
@@ -953,6 +902,7 @@ class PreProcess:
         normalization_mode: str,
     ):
         audio_length = 0
+        skipped_short = 0
         try:
             if cut_preprocess == "Automatic":
                 return self._process_automatic(
@@ -979,7 +929,7 @@ class PreProcess:
                 normalization_gain = self._detect_post_normalization_gain(audio)
             if cut_preprocess == "Skip":
                 # no cutting
-                self.process_audio_segment(
+                skipped_short = self.process_audio_segment(
                     audio,
                     sid,
                     idx0,
@@ -989,7 +939,7 @@ class PreProcess:
                 )
             elif cut_preprocess == "Simple":
                 # simple
-                self.simple_cut(
+                skipped_short = self.simple_cut(
                     audio,
                     sid,
                     idx0,
@@ -1002,7 +952,7 @@ class PreProcess:
             print(f"Error processing audio: {error}")
             if cut_preprocess == "Automatic" or self.dataset_format == "flac":
                 raise
-        return audio_length
+        return audio_length, skipped_short
 
 
 def format_duration(seconds):
@@ -1156,7 +1106,7 @@ def preprocess_training_set(
         print("FireRedVAD inference: CPU")
     pp = PreProcess(sr, exp_dir, dataset_format, use_fireredvad_gpu)
 
-    audio_length = []
+    process_results = []
     if cut_preprocess == "Simple":
         files_by_speaker = {}
         for file_path, idx0, sid in files:
@@ -1219,14 +1169,14 @@ def preprocess_training_set(
                     executor.submit(worker, work_item) for work_item in work_items
                 ]
                 for future in concurrent.futures.as_completed(futures):
-                    audio_length.append(future.result())
+                    process_results.append(future.result())
                     pbar.update(1)
     finally:
         if use_fireredvad_gpu:
             shutdown_fireredvad_gpu()
 
-    audio_length = sum(audio_length)
-    removed_short_outputs = remove_short_output_audio(exp_dir)
+    audio_length = sum(result[0] for result in process_results)
+    skipped_short_outputs = sum(result[1] for result in process_results)
     save_dataset_duration(
         os.path.join(exp_dir, "model_info.json"),
         dataset_duration=audio_length,
@@ -1241,8 +1191,8 @@ def preprocess_training_set(
     print(
         f"Preprocess completed in {elapsed_time:.2f} seconds on "
         f"{format_duration(audio_length)} seconds of audio. Short-audio filter: "
-        f"{automatic_filter}{removed_short_outputs} output slice(s) under "
-        f"{MINIMUM_OUTPUT_AUDIO_SECONDS:.1f}s removed."
+        f"{automatic_filter}{skipped_short_outputs} output slice(s) under "
+        f"{MINIMUM_OUTPUT_AUDIO_SECONDS:.1f}s skipped before writing."
     )
 
 

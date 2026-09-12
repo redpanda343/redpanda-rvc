@@ -210,7 +210,7 @@ if __name__ == "__main__":
     embedder_model = sys.argv[6]
     include_mutes = int(sys.argv[7]) if len(sys.argv) > 7 else 2
 
-    wav_path = os.path.join(exp_dir, "sliced_audios_16k")
+    wav_path = os.path.join(exp_dir, "sliced_audios")
 
     if not os.path.exists(wav_path):
         print(

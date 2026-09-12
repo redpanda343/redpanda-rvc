@@ -43,13 +43,16 @@ def get_embedding_metadata(embedder_model):
 
 
 def load_audio_16k(file):
-    # this is used by f0 and feature extractions that load preprocessed 16k files, so there's no need to resample
     try:
-        audio, sr = librosa.load(file, sr=16000)
+        audio, sr = sf.read(file, dtype="float32", always_2d=False)
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1, dtype=np.float32)
+        if sr != 16000:
+            audio = soxr.resample(audio, sr, 16000, quality="HQ")
     except Exception as error:
         raise RuntimeError(f"An error occurred loading the audio: {error}")
 
-    return audio.flatten()
+    return np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
 
 
 def load_audio(file, sample_rate):
