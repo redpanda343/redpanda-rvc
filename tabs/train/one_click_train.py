@@ -526,7 +526,7 @@ def one_click_train_tab():
                 interactive=True,
             )
             dataset_format = gr.Radio(
-                choices=["WAV", "FLAC"],
+                choices=["WAV", "WAV 32-bit float", "FLAC"],
                 value="WAV",
                 label=i18n("Dataset format"),
                 interactive=True,

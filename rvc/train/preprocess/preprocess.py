@@ -50,7 +50,7 @@ AUTOMATIC_VAD_CONTEXT_SECONDS = 2.0
 AUTOMATIC_VAD_MAX_BATCH_BLOCKS = 16
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
-SUPPORTED_DATASET_FORMATS = {"wav", "flac"}
+SUPPORTED_DATASET_FORMATS = {"wav", "wav_float32", "flac"}
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
 FLAC_COMPRESSION_LEVEL = 0.0
@@ -62,9 +62,11 @@ SIMPLE_BLEND_FRAMES = 100
 
 def normalize_dataset_format(dataset_format: str) -> str:
     normalized_format = str(dataset_format).strip().lower()
+    if normalized_format == "wav 32-bit float":
+        normalized_format = "wav_float32"
     if normalized_format not in SUPPORTED_DATASET_FORMATS:
         raise ValueError(
-            f"Unsupported dataset format '{dataset_format}'. Expected WAV or FLAC."
+            f"Unsupported dataset format '{dataset_format}'. Expected WAV, WAV 32-bit float, or FLAC."
         )
     return normalized_format
 
@@ -87,6 +89,15 @@ def write_training_audio(
             os.path.join(directory, f"{stem}.wav"),
             sample_rate,
             (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16),
+        )
+        return
+    if dataset_format == "wav_float32":
+        sf.write(
+            os.path.join(directory, f"{stem}.wav"),
+            np.clip(audio, -1.0, 1.0),
+            sample_rate,
+            format="WAV",
+            subtype="FLOAT",
         )
         return
 
@@ -963,6 +974,7 @@ def format_duration(seconds):
 
 
 def save_dataset_duration(file_path, dataset_duration, dataset_format="wav"):
+    normalized_format = normalize_dataset_format(dataset_format)
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -973,7 +985,12 @@ def save_dataset_duration(file_path, dataset_duration, dataset_format="wav"):
     new_data = {
         "total_dataset_duration": formatted_duration,
         "total_seconds": dataset_duration,
-        "dataset_format": normalize_dataset_format(dataset_format),
+        "dataset_format": "flac" if normalized_format == "flac" else "wav",
+        "dataset_subtype": {
+            "wav": "PCM_16",
+            "wav_float32": "FLOAT",
+            "flac": "PCM_24",
+        }[normalized_format],
     }
     data.update(new_data)
 

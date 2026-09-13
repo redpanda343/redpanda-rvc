@@ -1190,10 +1190,10 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--dataset-format",
-    type=click.Choice(["WAV", "FLAC"], case_sensitive=False),
+    type=click.Choice(["WAV", "WAV 32-bit float", "FLAC"], case_sensitive=False),
     default="WAV",
     show_default=True,
-    help="Format used for processed training slices.",
+    help="Format and encoding used for processed training slices.",
 )
 @click.option(
     "--truncate-silence/--no-truncate-silence",

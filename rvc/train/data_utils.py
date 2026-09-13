@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import soundfile as sf
 import torch
@@ -37,12 +36,7 @@ class TextAudioLoaderMultiNSFsid(torch.utils.data.Dataset):
         for audiopath, text, pitch, pitchf, dv in self.audiopaths_and_text:
             if self.min_text_len <= len(text) and len(text) <= self.max_text_len:
                 audiopaths_and_text_new.append([audiopath, text, pitch, pitchf, dv])
-                if os.path.splitext(audiopath)[1].lower() == ".flac":
-                    lengths.append(sf.info(audiopath).frames // self.hop_length)
-                else:
-                    lengths.append(
-                        os.path.getsize(audiopath) // (3 * self.hop_length)
-                    )
+                lengths.append(sf.info(audiopath).frames // self.hop_length)
         self.audiopaths_and_text = audiopaths_and_text_new
         self.lengths = lengths
 
