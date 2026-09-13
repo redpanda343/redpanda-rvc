@@ -21,31 +21,52 @@ def pull_updates():
     git_environment = os.environ.copy()
     git_environment["GIT_TERMINAL_PROMPT"] = "0"
 
-    try:
-        before = subprocess.run(
-            [*git_command, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-            env=git_environment,
-        ).stdout.strip()
-        result = subprocess.run(
-            [*git_command, "pull", "--ff-only", "--autostash"],
-            timeout=60,
+    def run_git(*arguments, capture_output=False, check=False, timeout=10):
+        return subprocess.run(
+            [*git_command, *arguments],
+            capture_output=capture_output,
+            text=capture_output,
+            check=check,
+            timeout=timeout,
             env=git_environment,
         )
+
+    def commit_for(reference):
+        result = run_git("rev-parse", "--verify", reference, capture_output=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+
+    def ancestor_status(ancestor, descendant):
+        return run_git("merge-base", "--is-ancestor", ancestor, descendant).returncode
+
+    try:
+        before = commit_for("HEAD")
+        previous_upstream = commit_for("@{upstream}")
+        tracked_files_were_clean = (
+            run_git("diff", "--quiet").returncode == 0
+            and run_git("diff", "--cached", "--quiet").returncode == 0
+        )
+        result = run_git("pull", "--ff-only", "--autostash", timeout=60)
         if result.returncode != 0:
-            print("Update failed. Starting the current version.")
-            return
-        after = subprocess.run(
-            [*git_command, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-            env=git_environment,
-        ).stdout.strip()
+            current_upstream = commit_for("@{upstream}")
+            can_follow_rewrite = (
+                before
+                and previous_upstream
+                and current_upstream
+                and previous_upstream != current_upstream
+                and tracked_files_were_clean
+                and ancestor_status(before, previous_upstream) == 0
+                and ancestor_status(previous_upstream, current_upstream) == 1
+            )
+            if not can_follow_rewrite:
+                print("Update failed. Starting the current version.")
+                return
+            print("Remote history changed. Updating the clean checkout...")
+            if run_git("reset", "--keep", current_upstream).returncode != 0:
+                print("Update failed. Starting the current version.")
+                return
+        after = commit_for("HEAD")
     except (OSError, subprocess.SubprocessError) as error:
         print(f"Update failed. Starting the current version: {error}")
         return
