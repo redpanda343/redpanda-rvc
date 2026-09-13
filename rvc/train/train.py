@@ -960,6 +960,10 @@ def run(
         )
         inference_exporter = AsyncInferenceExporter(export_device)
 
+    scalar_log_state = {
+        "loss_sums": torch.zeros(6, device=device, dtype=torch.float32),
+        "batch_count": 0,
+    }
     try:
         for epoch in range(epoch_str, total_epoch + 1):
             train_and_evaluate(
@@ -970,6 +974,7 @@ def run(
                 [optim_g, optim_d],
                 [train_loader, None],
                 [writer_eval],
+                scalar_log_state,
                 cache,
                 custom_save_every_weights,
                 custom_total_epoch,
@@ -1001,6 +1006,7 @@ def train_and_evaluate(
     optims,
     loaders,
     writers,
+    scalar_log_state,
     cache,
     custom_save_every_weights,
     custom_total_epoch,
@@ -1036,6 +1042,10 @@ def train_and_evaluate(
     if writers is not None:
         writer = writers[0]
 
+    log_interval = int(hps.train.log_interval)
+    if log_interval < 1:
+        raise ValueError("train.log_interval must be at least 1")
+
     train_loader.batch_sampler.set_epoch(epoch)
 
     net_g.train()
@@ -1060,11 +1070,8 @@ def train_and_evaluate(
         data_iterator = enumerate(train_loader)
 
     epoch_recorder = EpochRecorder()
-    epoch_loss_sums = torch.zeros(6, device=device, dtype=torch.float32)
-    epoch_batch_count = 0
-    epoch_grad_norms = None
     with tqdm(total=len(train_loader), leave=False) as pbar:
-        for epoch_batch_index, (batch_idx, info) in enumerate(data_iterator):
+        for batch_idx, info in data_iterator:
             if device.type == "cuda" and not cache_data_in_gpu:
                 info = [tensor.cuda(device_id, non_blocking=True) for tensor in info]
             elif device.type != "cuda":
@@ -1083,9 +1090,7 @@ def train_and_evaluate(
                 sid,
             ) = info
 
-            log_grad_norms = (
-                rank == 0 and epoch_batch_index + 1 == len(train_loader)
-            )
+            log_grad_norms = rank == 0 and (global_step + 1) % log_interval == 0
 
             with torch.amp.autocast(
                 device_type="cuda", enabled=use_amp, dtype=train_dtype
@@ -1212,7 +1217,7 @@ def train_and_evaluate(
 
             global_step += 1
 
-            epoch_loss_sums.add_(
+            scalar_log_state["loss_sums"].add_(
                 torch.stack(
                     (
                         loss_gen_all.detach(),
@@ -1224,17 +1229,45 @@ def train_and_evaluate(
                     )
                 ).float()
             )
-            epoch_batch_count += 1
+            scalar_log_state["batch_count"] += 1
 
-            if log_grad_norms:
-                epoch_grad_norms = (
-                    torch.stack(
-                        (
-                            grad_norm_d,
-                            grad_norm_g,
-                        )
-                    ).float()
+            if global_step % log_interval == 0:
+                scalar_log_totals = torch.cat(
+                    (
+                        scalar_log_state["loss_sums"],
+                        scalar_log_state["loss_sums"].new_tensor(
+                            [scalar_log_state["batch_count"]]
+                        ),
+                    )
                 )
+                if dist.get_world_size() > 1:
+                    if dist.get_backend() == "gloo" and scalar_log_totals.is_cuda:
+                        scalar_log_totals = scalar_log_totals.cpu()
+                    dist.reduce(scalar_log_totals, dst=0, op=dist.ReduceOp.SUM)
+                if rank == 0:
+                    scalar_values = (
+                        scalar_log_totals[:-1] / scalar_log_totals[-1]
+                    ).cpu().tolist()
+                    gradient_values = (
+                        torch.stack((grad_norm_d, grad_norm_g)).float().cpu().tolist()
+                    )
+                    summarize(
+                        writer=writer,
+                        global_step=global_step,
+                        scalars={
+                            "loss/g/total": scalar_values[0],
+                            "loss/d/adv": scalar_values[1],
+                            "learning_rate": optim_g.param_groups[0]["lr"],
+                            "loss/g/adv": scalar_values[2],
+                            "loss/g/fm": scalar_values[3],
+                            "loss/g/mel": scalar_values[4],
+                            "loss/g/kl": scalar_values[5],
+                            "grad/norm_d": gradient_values[0],
+                            "grad/norm_g": gradient_values[1],
+                        },
+                    )
+                scalar_log_state["loss_sums"].zero_()
+                scalar_log_state["batch_count"] = 0
             if (
                 inference_exporter is not None
                 and save_every_steps > 0
@@ -1263,33 +1296,9 @@ def train_and_evaluate(
         # end of batch train
     # end of tqdm
 
-    epoch_loss_totals = torch.cat(
-        (epoch_loss_sums, epoch_loss_sums.new_tensor([epoch_batch_count]))
-    )
-    if dist.get_world_size() > 1:
-        if dist.get_backend() == "gloo" and epoch_loss_totals.is_cuda:
-            epoch_loss_totals = epoch_loss_totals.cpu()
-        dist.reduce(epoch_loss_totals, dst=0, op=dist.ReduceOp.SUM)
-
-    # Logging and checkpointing
     if rank == 0:
-        epoch_values = (
-            epoch_loss_totals[:-1] / epoch_loss_totals[-1]
-        ).cpu().tolist()
-        gradient_values = epoch_grad_norms.cpu().tolist()
-        scalar_dict = {
-            "loss/g/total": epoch_values[0],
-            "loss/d/adv": epoch_values[1],
-            "learning_rate": optim_g.param_groups[0]["lr"],
-            "loss/g/adv": epoch_values[2],
-            "loss/g/fm": epoch_values[3],
-            "loss/g/mel": epoch_values[4],
-            "loss/g/kl": epoch_values[5],
-            "grad/norm_d": gradient_values[0],
-            "grad/norm_g": gradient_values[1],
-        }
-
         if epoch % save_every_epoch == 0:
+            validation_scalars = {}
             mel = spec_to_mel_torch(
                 spec,
                 config.data.filter_length,
@@ -1367,7 +1376,7 @@ def train_and_evaluate(
                         device,
                     )
                     if timbre_scores["multi_speaker"]:
-                        scalar_dict.update(
+                        validation_scalars.update(
                             {
                                 "validation/voice_similarity": timbre_scores[
                                     "speaker_mean"
@@ -1385,9 +1394,9 @@ def train_and_evaluate(
                             }
                         )
                     else:
-                        scalar_dict["validation/voice_similarity"] = timbre_scores[
-                            "speaker_mean"
-                        ]
+                        validation_scalars["validation/voice_similarity"] = (
+                            timbre_scores["speaker_mean"]
+                        )
                 except Exception as error:
                     print(f"ECAPA timbre validation failed: {error}")
             audio_dict = {}
@@ -1397,17 +1406,10 @@ def train_and_evaluate(
                 writer=writer,
                 global_step=global_step,
                 images=image_dict,
-                scalars=scalar_dict,
+                scalars=validation_scalars,
                 audios=audio_dict,
                 audio_sample_rate=config.data.sample_rate,
             )
-        else:
-            summarize(
-                writer=writer,
-                global_step=global_step,
-                scalars=scalar_dict,
-            )
-        writer.flush()
 
     # Save checkpoint
     model_add = []
