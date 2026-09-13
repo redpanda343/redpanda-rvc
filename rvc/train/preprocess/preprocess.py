@@ -1,5 +1,7 @@
 import concurrent.futures
+import io
 import json
+import math
 import multiprocessing
 import os
 import shutil
@@ -16,6 +18,8 @@ import librosa
 import noisereduce as nr
 import numpy as np
 import soundfile as sf
+import torch
+import torchaudio
 from scipy import signal
 from scipy.io import wavfile
 from tqdm import tqdm
@@ -54,6 +58,8 @@ SUPPORTED_DATASET_FORMATS = {"wav", "wav_float32", "flac"}
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
 FLAC_COMPRESSION_LEVEL = 0.0
+RESAMPLE_LOWPASS_FILTER_WIDTH = 128
+RESAMPLE_STREAM_CONTEXT_SECONDS = 1.0
 SIMPLE_SILENCE_THRESHOLD_DB = -45.0
 SIMPLE_MIN_SILENCE_SECONDS = 0.3
 SIMPLE_TRUNCATE_TO_SECONDS = 0.3
@@ -233,8 +239,59 @@ def _clean_audio_path(file: str) -> str:
     return file.strip(" ").strip('"').strip("\n").strip('"').strip(" ")
 
 
+def _get_audio_sample_rate(file: str) -> int:
+    command = [
+        _ffmpeg_path(),
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        _clean_audio_path(file),
+        "-frames:a",
+        "0",
+        "-f",
+        "wav",
+        "-acodec",
+        "pcm_f32le",
+        "-ac",
+        "1",
+        "pipe:1",
+    ]
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    return int(sf.info(io.BytesIO(result.stdout)).samplerate)
+
+
+def _resample_audio(
+    audio: np.ndarray,
+    source_sample_rate: int,
+    target_sample_rate: int,
+    resampler=None,
+) -> np.ndarray:
+    audio = np.asarray(audio, dtype=np.float32)
+    if not audio.flags.c_contiguous or not audio.flags.writeable:
+        audio = np.array(audio, dtype=np.float32, copy=True, order="C")
+    if source_sample_rate == target_sample_rate:
+        return audio
+    if resampler is None:
+        resampler = torchaudio.transforms.Resample(
+            orig_freq=source_sample_rate,
+            new_freq=target_sample_rate,
+            lowpass_filter_width=RESAMPLE_LOWPASS_FILTER_WIDTH,
+        )
+    waveform = torch.from_numpy(audio).unsqueeze(0)
+    with torch.inference_mode():
+        output = resampler(waveform).squeeze(0)
+    return output.contiguous().numpy()
+
+
 def load_audio_ffmpeg(file: str, sample_rate: int) -> np.ndarray:
     file = _clean_audio_path(file)
+    source_sample_rate = _get_audio_sample_rate(file)
     command = [
         _ffmpeg_path(),
         "-nostdin",
@@ -248,8 +305,6 @@ def load_audio_ffmpeg(file: str, sample_rate: int) -> np.ndarray:
         "pcm_f32le",
         "-ac",
         "1",
-        "-ar",
-        str(sample_rate),
         "pipe:1",
     ]
     result = subprocess.run(
@@ -258,7 +313,8 @@ def load_audio_ffmpeg(file: str, sample_rate: int) -> np.ndarray:
         stderr=subprocess.PIPE,
         check=True,
     )
-    return np.frombuffer(result.stdout, dtype=np.float32).flatten()
+    audio = np.frombuffer(result.stdout, dtype=np.float32)
+    return _resample_audio(audio, source_sample_rate, sample_rate)
 
 
 def truncate_silence(
@@ -331,35 +387,10 @@ def truncate_silence(
 def load_audio_ffmpeg_segment(
     file: str, sample_rate: int, start_s: float, duration_s: float
 ) -> np.ndarray:
-    file = _clean_audio_path(file)
-    command = [
-        _ffmpeg_path(),
-        "-nostdin",
-        "-threads",
-        "0",
-        "-ss",
-        f"{max(0.0, start_s):.9f}",
-        "-i",
-        file,
-        "-t",
-        f"{max(0.0, duration_s):.9f}",
-        "-f",
-        "f32le",
-        "-acodec",
-        "pcm_f32le",
-        "-ac",
-        "1",
-        "-ar",
-        str(sample_rate),
-        "pipe:1",
-    ]
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    )
-    return np.frombuffer(result.stdout, dtype=np.float32).copy()
+    start_s = max(0.0, start_s)
+    end_s = start_s + max(0.0, duration_s)
+    with FFmpegAudioStreamReader(file, sample_rate) as reader:
+        return reader.read_segment(start_s, end_s)
 
 
 def iter_audio_ffmpeg(file: str, sample_rate: int, block_seconds: float):
@@ -418,7 +449,15 @@ def iter_audio_ffmpeg(file: str, sample_rate: int, block_seconds: float):
 
 class FFmpegAudioStreamReader:
     def __init__(self, file: str, sample_rate: int):
-        self.sample_rate = sample_rate
+        self.source_sample_rate = _get_audio_sample_rate(file)
+        self.target_sample_rate = sample_rate
+        self.resampler = None
+        if self.source_sample_rate != self.target_sample_rate:
+            self.resampler = torchaudio.transforms.Resample(
+                orig_freq=self.source_sample_rate,
+                new_freq=self.target_sample_rate,
+                lowpass_filter_width=RESAMPLE_LOWPASS_FILTER_WIDTH,
+            )
         self.buffer = np.empty(0, dtype=np.float32)
         self.buffer_start = 0
         command = [
@@ -434,11 +473,11 @@ class FFmpegAudioStreamReader:
             "pcm_f32le",
             "-ac",
             "1",
-            "-ar",
-            str(sample_rate),
             "pipe:1",
         ]
-        block_bytes = int(sample_rate * AUTOMATIC_DECODE_BLOCK_SECONDS) * 4
+        block_bytes = (
+            int(self.source_sample_rate * AUTOMATIC_DECODE_BLOCK_SECONDS) * 4
+        )
         self.command = command
         self.process = subprocess.Popen(
             command,
@@ -482,20 +521,48 @@ class FFmpegAudioStreamReader:
             self.buffer_start += len(discarded)
 
     def read_segment(self, start_s: float, end_s: float) -> np.ndarray:
-        start = max(0, int(round(start_s * self.sample_rate)))
-        end = max(start, int(round(end_s * self.sample_rate)))
-        if start < self.buffer_start:
+        target_start = max(0, int(round(start_s * self.target_sample_rate)))
+        target_end = max(
+            target_start, int(round(end_s * self.target_sample_rate))
+        )
+        phase_period = self.source_sample_rate // math.gcd(
+            self.source_sample_rate, self.target_sample_rate
+        )
+        context = int(
+            round(self.source_sample_rate * RESAMPLE_STREAM_CONTEXT_SECONDS)
+        )
+        source_start = max(
+            0, int(math.floor(start_s * self.source_sample_rate)) - context
+        )
+        source_start -= source_start % phase_period
+        source_end = int(math.ceil(end_s * self.source_sample_rate)) + context
+        source_end = (
+            (source_end + phase_period - 1) // phase_period * phase_period
+        )
+        if source_start < self.buffer_start:
             raise ValueError("FFmpeg stream segments must be read in start-time order")
-        self._discard_to(start)
-        if self.buffer_start < start:
+        self._discard_to(source_start)
+        if self.buffer_start < source_start:
             return np.empty(0, dtype=np.float32)
-        required = end - self.buffer_start
+        required = source_end - self.buffer_start
         while len(self.buffer) < required:
             current = self._read_samples(required - len(self.buffer))
             if current.size == 0:
                 break
             self.buffer = np.concatenate((self.buffer, current))
-        return self.buffer[: end - start].copy()
+        audio = self.buffer[: source_end - source_start].copy()
+        resampled = _resample_audio(
+            audio,
+            self.source_sample_rate,
+            self.target_sample_rate,
+            self.resampler,
+        )
+        global_target_start = (
+            source_start * self.target_sample_rate // self.source_sample_rate
+        )
+        local_start = target_start - global_target_start
+        local_end = target_end - global_target_start
+        return resampled[local_start:local_end].copy()
 
     def close(self):
         if self.process.stdout is not None:
@@ -879,12 +946,17 @@ class PreProcess:
                             idx1 += 1
                         continue
 
+                    decode_target_start = int(round(decode_start * self.sr))
                     for clip_start, clip_end in group:
                         local_start = max(
-                            0, int(round((clip_start - decode_start) * self.sr))
+                            0,
+                            int(round(clip_start * self.sr))
+                            - decode_target_start,
                         )
                         local_end = min(
-                            len(audio), int(round((clip_end - decode_start) * self.sr))
+                            len(audio),
+                            int(round(clip_end * self.sr))
+                            - decode_target_start,
                         )
                         if local_end > local_start:
                             self.process_audio_segment(
