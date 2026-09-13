@@ -443,11 +443,10 @@ def train_tab():
                 label=i18n("Audio cutting"),
                 info=i18n(
                     "Audio file slicing method: Select 'Skip' if the files are "
-                    "already pre-sliced, 'Simple' to merge each speaker's clips "
-                    "and create fixed-length slices, or 'Automatic' to use "
+                    "already pre-sliced, or 'Automatic' to use "
                     "AI-based Voice Activity Detection with FireRedVAD."
                 ),
-                choices=["Skip", "Simple", "Automatic"],
+                choices=["Skip", "Automatic"],
                 value="Automatic",
                 interactive=True,
             )
@@ -500,7 +499,7 @@ def train_tab():
                 interactive=True,
                 visible=False,
             )
-            with gr.Row():
+            with gr.Row(visible=False):
                 chunk_len = gr.Slider(
                     0.5,
                     5.0,

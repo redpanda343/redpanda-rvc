@@ -1148,9 +1148,9 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--cut-preprocess",
-    type=click.Choice(["Skip", "Simple", "Automatic"]),
+    type=click.Choice(["Skip", "Automatic"]),
     default="Automatic",
-    help="Dataset cutting method. Simple merges clips per speaker before fixed-length slicing.",
+    help="Dataset cutting method.",
 )
 @click.option(
     "--process-effects",
@@ -1175,12 +1175,14 @@ def batch_infer(**kwargs):
     type=click.Choice([str(i * 0.5) for i in range(1, 11)]),
     default="3.0",
     help="Chunk length in seconds.",
+    hidden=True,
 )
 @click.option(
     "--overlap-len",
     type=click.Choice(["0.0", "0.1", "0.2", "0.3", "0.4"]),
     default="0.3",
     help="Overlap length.",
+    hidden=True,
 )
 @click.option(
     "--normalization-mode",
@@ -1203,6 +1205,7 @@ def batch_infer(**kwargs):
         "Shorten silence below -45 dB before Simple slicing. "
         "Ignored by other cutting methods."
     ),
+    hidden=True,
 )
 @click.option(
     "--truncate-silence-threshold-db",
@@ -1210,6 +1213,7 @@ def batch_infer(**kwargs):
     default=-45.0,
     show_default=True,
     help="Silence threshold used by Simple slicing when truncation is enabled.",
+    hidden=True,
 )
 @click.option(
     "--truncate-silence-to-seconds",
@@ -1217,6 +1221,7 @@ def batch_infer(**kwargs):
     default=0.3,
     show_default=True,
     help="Length retained from qualifying silence during Simple slicing.",
+    hidden=True,
 )
 @click.option(
     "--truncate-silence-minimum-seconds",
@@ -1224,6 +1229,7 @@ def batch_infer(**kwargs):
     default=0.3,
     show_default=True,
     help="Minimum silence duration detected during Simple slicing.",
+    hidden=True,
 )
 def preprocess(**kwargs):
     """Preprocess a dataset for training."""

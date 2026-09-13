@@ -107,7 +107,10 @@ def _load_custom_presets():
             and required_fields.issubset(settings)
             and name not in DEFAULT_TRAINING_PRESETS
         ):
-            loaded_presets[name] = defaults | settings
+            loaded_settings = defaults | settings
+            if loaded_settings["cut_preprocess"] == "Simple":
+                loaded_settings["cut_preprocess"] = "Automatic"
+            loaded_presets[name] = loaded_settings
     return loaded_presets
 
 
@@ -514,7 +517,7 @@ def one_click_train_tab():
                 interactive=True,
             )
             cut_preprocess = gr.Radio(
-                choices=["Skip", "Simple", "Automatic"],
+                choices=["Skip", "Automatic"],
                 value="Automatic",
                 label=i18n("Audio cutting"),
                 interactive=True,
