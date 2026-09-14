@@ -26,51 +26,51 @@ PRETRAINED_MODELS = {
     "Legacy core 1.5 NEW": [
         (
             "https://huggingface.co/lyery/test/resolve/main/G_2333333%20%286%29.pth",
-            "G_2333333 (6).pth",
+            "G_legacy_core15_new.pth",
         ),
         (
             "https://huggingface.co/lyery/test/resolve/main/D_2333333%20%286%29.pth",
-            "D_2333333 (6).pth",
+            "D_legacy_core15_new.pth",
         ),
     ],
     "Legacy core 1.6": [
         (
             "https://huggingface.co/lyery/legacy_core1.6/resolve/main/G_11.pth",
-            "G_11.pth",
+            "G_legacy_core16.pth",
         ),
         (
             "https://huggingface.co/lyery/legacy_core1.6/resolve/main/D_11.pth",
-            "D_11.pth",
+            "D_legacy_core16.pth",
         ),
     ],
     "Legacy core 1.5 OLD 32k": [
         (
             "https://huggingface.co/lyery/mode4/resolve/main/G_15.pth",
-            "G_15.pth",
+            "G_legacy_core15_old_32k.pth",
         ),
         (
             "https://huggingface.co/lyery/mode4/resolve/main/D_15.pth",
-            "D_15.pth",
+            "D_legacy_core15_old_32k.pth",
         ),
     ],
     "Legacy core 1.5 OLD 40k": [
         (
             "https://huggingface.co/lyery/mode4/resolve/main/G_40k.pth",
-            "G_40k.pth",
+            "G_legacy_core15_old_40k.pth",
         ),
         (
             "https://huggingface.co/lyery/mode4/resolve/main/D_40k.pth",
-            "D_40k.pth",
+            "D_legacy_core15_old_40k.pth",
         ),
     ],
     "Legacy core 1.5 OLD 48k": [
         (
             "https://huggingface.co/lyery/mode4/resolve/main/G_48k.pth",
-            "G_48k.pth",
+            "G_legacy_core15_old_48k.pth",
         ),
         (
             "https://huggingface.co/lyery/mode4/resolve/main/D_48k.pth",
-            "D_48k.pth",
+            "D_legacy_core15_old_48k.pth",
         ),
     ],
 }
