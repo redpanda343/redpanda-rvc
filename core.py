@@ -485,7 +485,7 @@ def run_preprocess_script(
     overlap_len: float,
     normalization_mode: str = "none",
     dataset_format: str = "WAV",
-    truncate_silence_enabled: bool = True,
+    truncate_silence_enabled: bool = False,
     truncate_silence_threshold_db: float = -45.0,
     truncate_silence_to_seconds: float = 0.3,
     truncate_silence_minimum_seconds: float = 0.3,
@@ -1148,7 +1148,7 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--cut-preprocess",
-    type=click.Choice(["Skip", "Automatic"]),
+    type=click.Choice(["Skip", "Simple", "Automatic"]),
     default="Automatic",
     help="Dataset cutting method.",
 )
@@ -1175,14 +1175,12 @@ def batch_infer(**kwargs):
     type=click.Choice([str(i * 0.5) for i in range(1, 11)]),
     default="3.0",
     help="Chunk length in seconds.",
-    hidden=True,
 )
 @click.option(
     "--overlap-len",
     type=click.Choice(["0.0", "0.1", "0.2", "0.3", "0.4"]),
     default="0.3",
     help="Overlap length.",
-    hidden=True,
 )
 @click.option(
     "--normalization-mode",
@@ -1199,7 +1197,7 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--truncate-silence/--no-truncate-silence",
-    default=True,
+    default=False,
     show_default=True,
     help=(
         "Shorten silence below -45 dB before Simple slicing. "

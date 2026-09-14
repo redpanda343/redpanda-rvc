@@ -30,11 +30,11 @@ sys.path.append(now_directory)
 import logging
 
 from rvc.train.preprocess.slicer import (
-    FIRERED_GPU_BATCH_SIZE,
     Slicer,
     fireredvad_cuda_available,
     shutdown_fireredvad_gpu,
 )
+from rvc.train.preprocess.rms_slicer import Slicer as AutomaticSlicer
 
 logging.getLogger("numba.core.byteflow").setLevel(logging.WARNING)
 logging.getLogger("numba.core.ssa").setLevel(logging.WARNING)
@@ -49,11 +49,7 @@ HIGH_PASS_CUTOFF = 20
 SAMPLE_RATE_16K = 16000
 MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS = 3.0
 MINIMUM_OUTPUT_AUDIO_SECONDS = 1.0
-AUTOMATIC_VAD_BLOCK_SECONDS = 180.0
-AUTOMATIC_VAD_CONTEXT_SECONDS = 2.0
-AUTOMATIC_VAD_MAX_BATCH_BLOCKS = 16
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
-AUTOMATIC_PROCESS_CONTEXT_SECONDS = 1.0
 SUPPORTED_DATASET_FORMATS = {"wav", "wav_float32", "flac"}
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
@@ -587,9 +583,12 @@ class PreProcess:
         dataset_format: str = "wav",
         use_fireredvad_gpu: bool = False,
     ):
-        self.slicer = Slicer(
+        self.post_normalization_slicer = Slicer(
             sr=sr,
             use_gpu=use_fireredvad_gpu,
+        )
+        self.automatic_slicer = AutomaticSlicer(
+            sr=sr,
             threshold=-42,
             min_length=1500,
             min_interval=400,
@@ -619,7 +618,7 @@ class PreProcess:
         return min(MAX_AMPLITUDE / voice_peak, POST_NORMALIZATION_MAX_GAIN)
 
     def _detect_post_normalization_gain(self, audio: np.ndarray):
-        voiced_chunks = self.slicer.slice(audio)
+        voiced_chunks = self.post_normalization_slicer.slice(audio)
         if not voiced_chunks:
             return 1.0
         voice_peak = max(float(np.max(np.abs(chunk))) for chunk in voiced_chunks)
@@ -700,7 +699,7 @@ class PreProcess:
 
     def process_simple_audio(
         self,
-        paths: list[str],
+        path: str,
         idx0: int,
         sid: int,
         process_effects: bool,
@@ -709,18 +708,13 @@ class PreProcess:
         chunk_len: float,
         overlap_len: float,
         normalization_mode: str,
-        truncate_silence_enabled: bool = True,
+        truncate_silence_enabled: bool = False,
         truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
         truncate_silence_to_seconds: float = SIMPLE_TRUNCATE_TO_SECONDS,
         truncate_silence_minimum_seconds: float = SIMPLE_MIN_SILENCE_SECONDS,
     ):
-        audio_parts = [load_audio_ffmpeg(path, self.sr) for path in paths]
-        audio_length = sum(len(part) for part in audio_parts) / self.sr
-        audio = (
-            audio_parts[0]
-            if len(audio_parts) == 1
-            else np.concatenate(audio_parts)
-        )
+        audio = load_audio_ffmpeg(path, self.sr)
+        audio_length = len(audio) / self.sr
         if truncate_silence_enabled:
             audio = truncate_silence(
                 audio,
@@ -768,138 +762,6 @@ class PreProcess:
             )
         return audio
 
-    @staticmethod
-    def _automatic_block_result(
-        analysis, analysis_start, core_start, core_end, detected_intervals
-    ):
-        intervals = []
-        voice_peak = 0.0
-        for start_s, end_s in detected_intervals:
-            start_sample = int(round(start_s * SAMPLE_RATE_16K))
-            end_sample = int(round(end_s * SAMPLE_RATE_16K))
-            if end_sample <= core_start or start_sample >= core_end:
-                continue
-            voice_start = max(start_sample, core_start)
-            voice_end = min(end_sample, core_end)
-            if voice_end > voice_start:
-                voice_peak = max(
-                    voice_peak,
-                    float(np.max(np.abs(analysis[voice_start:voice_end]))),
-                )
-            intervals.append(
-                (
-                    (analysis_start + start_sample) / SAMPLE_RATE_16K,
-                    (analysis_start + end_sample) / SAMPLE_RATE_16K,
-                )
-            )
-        return intervals, voice_peak
-
-    def _detect_automatic_intervals(self, path: str):
-        context_samples = int(round(SAMPLE_RATE_16K * AUTOMATIC_VAD_CONTEXT_SECONDS))
-        batch_blocks = (
-            max(1, min(FIRERED_GPU_BATCH_SIZE, AUTOMATIC_VAD_MAX_BATCH_BLOCKS))
-            if self.slicer.use_gpu
-            else 1
-        )
-        pending = []
-        intervals = []
-        previous = None
-        previous_start = 0
-        past_context = np.empty(0, dtype=np.float32)
-        total_samples = 0
-        voice_peak = 0.0
-
-        def flush_pending():
-            nonlocal voice_peak
-            if not pending:
-                return
-            detected_groups = self.slicer.detect_voice_intervals_batch_16k(
-                [item[0] for item in pending]
-            )
-            for item, detected in zip(pending, detected_groups):
-                block_intervals, block_peak = self._automatic_block_result(
-                    item[0], item[1], item[2], item[3], detected
-                )
-                intervals.extend(block_intervals)
-                voice_peak = max(voice_peak, block_peak)
-            pending.clear()
-
-        for current in iter_audio_ffmpeg(
-            path, SAMPLE_RATE_16K, AUTOMATIC_VAD_BLOCK_SECONDS
-        ):
-            current = np.asarray(current, dtype=np.float32)
-            if previous is None:
-                previous = current
-                total_samples += len(current)
-                continue
-
-            future_context = current[:context_samples]
-            analysis = np.concatenate((past_context, previous, future_context))
-            analysis_start = previous_start - len(past_context)
-            core_start = len(past_context)
-            core_end = core_start + len(previous)
-            pending.append((analysis, analysis_start, core_start, core_end))
-            if len(pending) >= batch_blocks:
-                flush_pending()
-
-            past_context = previous[-context_samples:].copy()
-            previous_start += len(previous)
-            previous = current
-            total_samples += len(current)
-
-        if previous is not None:
-            analysis = (
-                np.concatenate((past_context, previous))
-                if past_context.size
-                else previous
-            )
-            analysis_start = previous_start - len(past_context)
-            core_start = len(past_context)
-            core_end = core_start + len(previous)
-            pending.append((analysis, analysis_start, core_start, core_end))
-        flush_pending()
-
-        duration_s = total_samples / SAMPLE_RATE_16K
-        return (
-            self.slicer.merge_voice_intervals(intervals, duration_s),
-            duration_s,
-            voice_peak,
-        )
-
-    @staticmethod
-    def _automatic_clip_ranges(intervals):
-        step = PERCENTAGE - OVERLAP
-        ranges = []
-        for interval_start, interval_end in intervals:
-            start = interval_start
-            while start < interval_end:
-                remaining = interval_end - start
-                if remaining > PERCENTAGE + OVERLAP:
-                    end = start + PERCENTAGE
-                    ranges.append((start, end))
-                    start += step
-                else:
-                    ranges.append((start, interval_end))
-                    break
-        return ranges
-
-    @staticmethod
-    def _group_clip_ranges(ranges):
-        if not ranges:
-            return []
-        groups = []
-        current = [ranges[0]]
-        group_start = ranges[0][0]
-        for clip_range in ranges[1:]:
-            if clip_range[1] - group_start <= AUTOMATIC_DECODE_BLOCK_SECONDS:
-                current.append(clip_range)
-            else:
-                groups.append(current)
-                current = [clip_range]
-                group_start = clip_range[0]
-        groups.append(current)
-        return groups
-
     def _process_automatic(
         self,
         path: str,
@@ -910,65 +772,49 @@ class PreProcess:
         reduction_strength: float,
         normalization_mode: str,
     ):
-        intervals, duration_s, voice_peak = self._detect_automatic_intervals(path)
+        audio = load_audio_ffmpeg(path, self.sr)
+        duration_s = librosa.get_duration(y=audio, sr=self.sr)
         if duration_s < MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS:
             return 0.0, 0
-        if not intervals:
-            print(f"No speech or singing detected in: {path}")
+        audio = self._prepare_audio(
+            audio,
+            process_effects,
+            noise_reduction,
+            reduction_strength,
+            normalization_mode,
+        )
+        if audio is None:
             return duration_s, 0
+        normalization_gain = 1.0
+        if normalization_mode == "post":
+            normalization_gain = self._detect_post_normalization_gain(audio)
 
-        ranges = self._automatic_clip_ranges(intervals)
-        normalization_gain = self._post_normalization_gain(voice_peak)
+        segments = self.automatic_slicer.slice(audio)
         idx1 = 0
-        groups = self._group_clip_ranges(ranges)
-        with FFmpegAudioStreamReader(path, self.sr) as reader:
-            with BoundedAudioWriter(self.audio_write_workers) as writer:
-                for group in groups:
-                    batch_start = group[0][0]
-                    batch_end = group[-1][1]
-                    decode_start = max(
-                        0.0, batch_start - AUTOMATIC_PROCESS_CONTEXT_SECONDS
-                    )
-                    decode_end = min(
-                        duration_s, batch_end + AUTOMATIC_PROCESS_CONTEXT_SECONDS
-                    )
-                    audio = reader.read_segment(decode_start, decode_end)
-                    audio = self._prepare_audio(
-                        audio,
-                        process_effects,
-                        noise_reduction,
-                        reduction_strength,
+        step_samples = int(self.sr * (PERCENTAGE - OVERLAP))
+        chunk_samples = int(self.sr * PERCENTAGE)
+        long_tail_samples = int(self.sr * (PERCENTAGE + OVERLAP))
+        with BoundedAudioWriter(self.audio_write_workers) as writer:
+            for segment in segments:
+                start = 0
+                while start < len(segment):
+                    if len(segment) - start > long_tail_samples:
+                        chunk = segment[start : start + chunk_samples]
+                    else:
+                        chunk = segment[start:]
+                    self.process_audio_segment(
+                        chunk,
+                        sid,
+                        idx0,
+                        idx1,
                         normalization_mode,
+                        normalization_gain,
+                        writer,
                     )
-                    if audio is None:
-                        for _ in group:
-                            print(f"{sid}-{idx0}-{idx1}-filtered")
-                            idx1 += 1
-                        continue
-
-                    decode_target_start = int(round(decode_start * self.sr))
-                    for clip_start, clip_end in group:
-                        local_start = max(
-                            0,
-                            int(round(clip_start * self.sr))
-                            - decode_target_start,
-                        )
-                        local_end = min(
-                            len(audio),
-                            int(round(clip_end * self.sr))
-                            - decode_target_start,
-                        )
-                        if local_end > local_start:
-                            self.process_audio_segment(
-                                audio[local_start:local_end],
-                                sid,
-                                idx0,
-                                idx1,
-                                normalization_mode,
-                                normalization_gain,
-                                writer,
-                            )
-                        idx1 += 1
+                    idx1 += 1
+                    if len(segment) - start <= long_tail_samples:
+                        break
+                    start += step_samples
         return duration_s, writer.skipped_short
 
     def process_audio(
@@ -1100,7 +946,7 @@ def process_audio_wrapper(args):
 def process_simple_audio_wrapper(args):
     (
         pp,
-        paths,
+        path,
         idx0,
         sid,
         process_effects,
@@ -1115,7 +961,7 @@ def process_simple_audio_wrapper(args):
         truncate_silence_minimum_seconds,
     ) = args
     return pp.process_simple_audio(
-        paths,
+        path,
         idx0,
         sid,
         process_effects,
@@ -1144,7 +990,7 @@ def preprocess_training_set(
     overlap_len: float,
     normalization_mode: str,
     dataset_format: str = "wav",
-    truncate_silence_enabled: bool = True,
+    truncate_silence_enabled: bool = False,
     truncate_silence_threshold_db: float = SIMPLE_SILENCE_THRESHOLD_DB,
     truncate_silence_to_seconds: float = SIMPLE_TRUNCATE_TO_SECONDS,
     truncate_silence_minimum_seconds: float = SIMPLE_MIN_SILENCE_SECONDS,
@@ -1187,7 +1033,7 @@ def preprocess_training_set(
         clear_simple_preprocess_artifacts(exp_dir)
     elif dataset_format == "flac":
         clear_flac_preprocess_artifacts(exp_dir)
-    uses_fireredvad = cut_preprocess == "Automatic" or normalization_mode == "post"
+    uses_fireredvad = normalization_mode == "post"
     use_fireredvad_gpu = uses_fireredvad and fireredvad_cuda_available()
     if use_fireredvad_gpu:
         print("FireRedVAD inference: CUDA")
@@ -1197,14 +1043,11 @@ def preprocess_training_set(
 
     process_results = []
     if cut_preprocess == "Simple":
-        files_by_speaker = {}
-        for file_path, idx0, sid in files:
-            files_by_speaker.setdefault(sid, []).append((file_path, idx0))
         work_items = [
             (
                 pp,
-                [file_path for file_path, _ in speaker_files],
-                speaker_files[0][1],
+                file_path,
+                idx0,
                 sid,
                 process_effects,
                 noise_reduction,
@@ -1217,7 +1060,7 @@ def preprocess_training_set(
                 truncate_silence_to_seconds,
                 truncate_silence_minimum_seconds,
             )
-            for sid, speaker_files in sorted(files_by_speaker.items())
+            for file_path, idx0, sid in files
         ]
         worker = process_simple_audio_wrapper
     else:
@@ -1302,7 +1145,7 @@ if __name__ == "__main__":
     overlap_len = float(sys.argv[10])
     normalization_mode = str(sys.argv[11])
     dataset_format = str(sys.argv[12]) if len(sys.argv) > 12 else "WAV"
-    truncate_silence_enabled = strtobool(sys.argv[13]) if len(sys.argv) > 13 else True
+    truncate_silence_enabled = strtobool(sys.argv[13]) if len(sys.argv) > 13 else False
     truncate_silence_threshold_db = (
         float(sys.argv[14]) if len(sys.argv) > 14 else SIMPLE_SILENCE_THRESHOLD_DB
     )

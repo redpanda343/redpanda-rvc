@@ -63,7 +63,7 @@ def _get_aed_model(use_gpu: bool = False):
             from fireredvad import FireRedAed, FireRedAedConfig
         except ImportError as exc:
             raise RuntimeError(
-                "Automatic slicing requires FireRedVAD. Install the Applio "
+                "Post normalization requires FireRedVAD. Install the Applio "
                 "requirements (or run `pip install fireredvad==0.0.2`)."
             ) from exc
 
@@ -75,7 +75,7 @@ def _get_aed_model(use_gpu: bool = False):
         if missing:
             expected = ", ".join(str(FIRERED_MODEL_DIR / name) for name in missing)
             raise FileNotFoundError(
-                "FireRedVAD AED model files are missing. Automatic slicing requires: "
+                "FireRedVAD AED model files are missing. Post normalization requires: "
                 f"{expected}"
             )
 
