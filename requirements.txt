@@ -19,10 +19,13 @@ fireredvad==0.0.2
 
 torch==2.11.0
 torchaudio==2.11.0
+torchvision==0.26.0
 praat-parselmouth
 torchfcpe==0.0.4
 einops==0.8.2
+timm==1.0.25
 transformers==5.13.1
+utmosv2 @ https://github.com/sarulab-speech/UTMOSv2/archive/cc2700db57bb83ee13dc31ebe1b868c254e15d09.zip
 
 matplotlib==3.11.0
 tensorboard==2.21.0

@@ -42,6 +42,10 @@ from rvc.train.utils import (
 # Zluda hijack
 import rvc.lib.zluda
 from rvc.lib.algorithm import commons
+from rvc.train.mos_validation import (
+    UTMOSv2Validator,
+    deterministic_validation_scope,
+)
 from rvc.train.process.extract_model import extract_model
 from rvc.train.timbre_validation import ECAPATimbreValidator
 
@@ -221,6 +225,8 @@ def _select_held_out_paths(
                     continue
                 if sample[1].abs().mean().item() <= 1e-4:
                     continue
+                if sample[1].size(-1) < int(2 * dataset.sample_rate):
+                    continue
                 selected.append(audio_path)
                 counts[speaker_id] += 1
                 progress = True
@@ -251,12 +257,16 @@ def prepare_held_out_timbre_reference(
                 candidate = json.load(file)
             if (
                 isinstance(candidate, dict)
-                and candidate.get("version") == 2
+                and candidate.get("version") == 3
                 and candidate.get("dataset_signature") == signature
                 and candidate.get("seed") == seed
                 and candidate.get("minimum_training_samples")
                 == minimum_training_samples
                 and isinstance(candidate.get("audio_paths"), list)
+                and all(
+                    "mute" not in os.path.basename(path).lower()
+                    for path in candidate["audio_paths"]
+                )
             ):
                 manifest = candidate
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -267,7 +277,7 @@ def prepare_held_out_timbre_reference(
             allowed = max(0, len(dataset) - minimum_training_samples)
             held_out_paths = held_out_paths[:allowed]
             manifest = {
-                "version": 2,
+                "version": 3,
                 "dataset_signature": signature,
                 "seed": seed,
                 "minimum_training_samples": minimum_training_samples,
@@ -309,14 +319,18 @@ def prepare_held_out_timbre_reference(
         except Exception as error:
             print(f"Could not load held-out validation sample '{item[0]}': {error}")
             continue
-        if sample[1].abs().mean().item() > 1e-4:
+        if (
+            sample[1].abs().mean().item() > 1e-4
+            and sample[1].size(-1) >= int(2 * dataset.sample_rate)
+        ):
             samples.append(sample)
 
     if not samples:
         return None, False
 
     print(
-        f"Held-out ECAPA validation uses {len(samples)} clips; {len(dataset)} clips remain for training."
+        f"Held-out validation uses {len(samples)} clips of at least 2 seconds; "
+        f"{len(dataset)} clips remain for training."
     )
     return _timbre_reference_from_samples(samples, collate_fn, device), True
 
@@ -953,6 +967,33 @@ def run(
             print(f"ECAPA timbre validation disabled: {error}")
             timbre_validator = None
 
+    mos_validator = None
+    if rank == 0 and timbre_is_held_out and timbre_reference is not None:
+        try:
+            mos_model_paths = [
+                os.path.join(
+                    "rvc",
+                    "models",
+                    "pretraineds",
+                    "utmosv2",
+                    f"fold{fold}_s42_best_model.pth",
+                )
+                for fold in range(5)
+            ]
+            mos_device = (
+                torch.device("cuda", device_id) if device.type == "cuda" else device
+            )
+            mos_validator = UTMOSv2Validator(
+                mos_model_paths, config.train.seed, mos_device
+            )
+            print(
+                "UTMOSv2 five-fold, five-frame validation enabled with deterministic "
+                f"FP32 single-file {mos_device.type.upper()} inference."
+            )
+        except Exception as error:
+            print(f"UTMOSv2 validation disabled: {error}")
+            mos_validator = None
+
     inference_exporter = None
     if rank == 0 and save_every_steps > 0:
         export_device = (
@@ -982,6 +1023,7 @@ def run(
                 device_id,
                 audio_reference,
                 timbre_validator,
+                mos_validator,
                 timbre_reference,
                 timbre_is_held_out,
                 fn_mel_loss,
@@ -1014,6 +1056,7 @@ def train_and_evaluate(
     device_id,
     audio_reference,
     timbre_validator,
+    mos_validator,
     timbre_reference,
     timbre_is_held_out,
     fn_mel_loss,
@@ -1341,19 +1384,20 @@ def train_and_evaluate(
             audio_o = None
             timbre_o = None
             try:
-                with torch.random.fork_rng(devices=rng_devices):
-                    torch.manual_seed(config.train.seed)
+                with deterministic_validation_scope(
+                    config.train.seed, cuda_devices=rng_devices
+                ):
                     with torch.amp.autocast(
-                        device_type="cuda", enabled=use_amp, dtype=train_dtype
+                        device_type="cuda", enabled=False
                     ):
                         with torch.inference_mode():
-                            if timbre_validator is not None:
+                            if timbre_validator is not None or mos_validator is not None:
                                 try:
                                     timbre_o, *_ = inference_model.infer(
                                         *timbre_reference[0]
                                     )
                                 except Exception as error:
-                                    print(f"ECAPA reference generation failed: {error}")
+                                    print(f"Held-out validation generation failed: {error}")
                             if audio_reference is not None:
                                 if timbre_o is not None:
                                     audio_o = timbre_o[:1]
@@ -1362,12 +1406,19 @@ def train_and_evaluate(
             finally:
                 inference_model.train()
 
-            if timbre_validator is not None and timbre_o is not None:
+            generated_lengths = None
+            if timbre_o is not None:
+                generated_lengths = (
+                    timbre_reference[0][1].detach() * config.data.hop_length
+                )
+
+            if (
+                timbre_validator is not None
+                and timbre_o is not None
+                and generated_lengths is not None
+            ):
                 try:
                     speaker_ids = timbre_reference[3]
-                    generated_lengths = (
-                        timbre_reference[0][1].detach() * config.data.hop_length
-                    )
                     timbre_scores = timbre_validator.score_batch_accelerated(
                         timbre_o.detach(),
                         generated_lengths,
@@ -1399,6 +1450,22 @@ def train_and_evaluate(
                         )
                 except Exception as error:
                     print(f"ECAPA timbre validation failed: {error}")
+            if (
+                mos_validator is not None
+                and timbre_o is not None
+                and generated_lengths is not None
+            ):
+                try:
+                    validation_scalars["validation/MOS_utmosv2"] = (
+                        mos_validator.score_batch(
+                            timbre_o.detach(),
+                            generated_lengths,
+                            timbre_reference[3],
+                            config.data.sample_rate,
+                        )
+                    )
+                except Exception as error:
+                    print(f"UTMOSv2 validation failed: {error}")
             audio_dict = {}
             if audio_o is not None:
                 audio_dict[f"gen/audio_{global_step:07d}"] = audio_o[0, :, :]
