@@ -20,6 +20,10 @@ from rvc.configs.config import Config
 from rvc.lib.predictors.f0 import RMVPE
 from rvc.lib.utils import get_embedding_metadata, load_audio_16k, load_embedding
 from rvc.train.extract.preparing_files import generate_config, generate_filelist
+from rvc.train.validation_data import (
+    build_validation_extraction_files,
+    write_validation_manifest,
+)
 
 # Load config
 config = Config()
@@ -262,6 +266,7 @@ if __name__ == "__main__":
             os.remove(stale_path)
         print("Embedder changed; removed stale features and indexes.")
     data.update(metadata)
+    data["f0_method"] = f0_method
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
@@ -288,11 +293,21 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    validation_files, validation_entries = build_validation_extraction_files(exp_dir)
+    extraction_files = files + validation_files
+    if validation_files:
+        print(
+            f"Caching pitch and features for {len(validation_files)} external "
+            "validation source clip(s)."
+        )
+
     devices = ["cpu"] if gpus == "-" else [f"cuda:{idx}" for idx in gpus.split("-")]
 
-    run_pitch_extraction(files, devices, f0_method, num_processes)
+    run_pitch_extraction(extraction_files, devices, f0_method, num_processes)
 
-    run_embedding_extraction(files, devices, embedder_model, num_processes)
+    run_embedding_extraction(extraction_files, devices, embedder_model, num_processes)
+
+    write_validation_manifest(exp_dir, validation_entries)
 
     generate_config(sample_rate, exp_dir)
     generate_filelist(exp_dir, sample_rate, include_mutes)

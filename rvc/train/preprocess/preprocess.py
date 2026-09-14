@@ -51,6 +51,7 @@ MINIMUM_AUTOMATIC_SOURCE_AUDIO_SECONDS = 3.0
 MINIMUM_OUTPUT_AUDIO_SECONDS = 1.0
 AUTOMATIC_DECODE_BLOCK_SECONDS = 60.0
 SUPPORTED_DATASET_FORMATS = {"wav", "wav_float32", "flac"}
+VALIDATION_AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
 FLAC_COMPRESSION_LEVEL = 0.0
@@ -71,6 +72,59 @@ def normalize_dataset_format(dataset_format: str) -> str:
             f"Unsupported dataset format '{dataset_format}'. Expected WAV, WAV 32-bit float, or FLAC."
         )
     return normalized_format
+
+
+def stage_validation_audio(input_root: str, exp_dir: str) -> int:
+    validation_sources = [
+        os.path.join(input_root, name)
+        for name in os.listdir(input_root)
+        if name.lower() == "validation"
+        and os.path.isdir(os.path.join(input_root, name))
+    ]
+    if len(validation_sources) > 1:
+        raise RuntimeError("The dataset contains multiple validation folders")
+
+    validation_target = os.path.join(exp_dir, "validation")
+    if not validation_sources:
+        if os.path.isdir(validation_target):
+            shutil.rmtree(validation_target)
+        return 0
+
+    validation_source = validation_sources[0]
+    staging_dir = os.path.join(exp_dir, f"validation.{os.getpid()}.tmp")
+    if os.path.isdir(staging_dir):
+        shutil.rmtree(staging_dir)
+    audio_target = os.path.join(staging_dir, "audio")
+    os.makedirs(audio_target, exist_ok=True)
+    copied = 0
+    try:
+        for root, directories, filenames in os.walk(validation_source):
+            directories.sort()
+            relative_root = os.path.relpath(root, validation_source)
+            destination_root = (
+                audio_target
+                if relative_root == "."
+                else os.path.join(audio_target, relative_root)
+            )
+            os.makedirs(destination_root, exist_ok=True)
+            for filename in sorted(filenames):
+                if not filename.lower().endswith(VALIDATION_AUDIO_EXTENSIONS):
+                    continue
+                shutil.copy2(
+                    os.path.join(root, filename),
+                    os.path.join(destination_root, filename),
+                )
+                copied += 1
+        if copied == 0:
+            raise RuntimeError("The validation folder contains no supported audio files")
+        if os.path.isdir(validation_target):
+            shutil.rmtree(validation_target)
+        os.replace(staging_dir, validation_target)
+    except Exception:
+        if os.path.isdir(staging_dir):
+            shutil.rmtree(staging_dir)
+        raise
+    return copied
 
 
 def write_training_audio(
@@ -1005,11 +1059,23 @@ def preprocess_training_set(
     start_time = time.time()
     dataset_format = normalize_dataset_format(dataset_format)
     print(f"Starting preprocess with {num_processes} workers...")
+    validation_count = stage_validation_audio(input_root, exp_dir)
+    if validation_count:
+        print(
+            f"Copied {validation_count} external validation audio file(s) to "
+            f"{os.path.join(exp_dir, 'validation', 'audio')}."
+        )
 
     files = []
     idx = 0
 
     for root, directories, filenames in os.walk(input_root):
+        if root == input_root:
+            directories[:] = [
+                directory
+                for directory in directories
+                if directory.lower() != "validation"
+            ]
         directories.sort()
         try:
             sid = 0 if root == input_root else int(os.path.basename(root))

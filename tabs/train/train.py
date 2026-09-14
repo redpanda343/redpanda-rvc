@@ -43,6 +43,8 @@ sup_audioext = {
     "ac3",
 }
 
+validation_audioext = {"wav", "mp3", "flac", "ogg"}
+
 # Custom Pretraineds
 pretraineds_custom_path = os.path.join(
     now_dir, "rvc", "models", "pretraineds", "custom"
@@ -170,6 +172,40 @@ def save_drop_dataset_audio(dropbox, dataset_name):
             relative_dataset_path = os.path.relpath(dataset_path, now_dir)
 
             return None, relative_dataset_path
+
+
+def save_drop_validation_audio(dropbox, dataset_path):
+    if not dropbox or not dataset_path:
+        gr.Info(i18n("Please select a dataset before adding validation audio."))
+        return None
+
+    file_extension = os.path.splitext(dropbox)[1][1:].lower()
+    if file_extension not in validation_audioext:
+        gr.Info(i18n("The file you dropped is not a supported validation audio file."))
+        return None
+
+    dataset_path = str(dataset_path).strip()
+    if os.path.isabs(dataset_path):
+        resolved_dataset_path = os.path.abspath(dataset_path)
+    else:
+        resolved_dataset_path = os.path.abspath(os.path.join(now_dir, dataset_path))
+    if not os.path.isdir(resolved_dataset_path):
+        gr.Info(i18n("The selected dataset folder does not exist."))
+        return None
+
+    validation_path = os.path.join(resolved_dataset_path, "validation")
+    os.makedirs(validation_path, exist_ok=True)
+    audio_file = format_title(os.path.basename(dropbox))
+    source_path = os.path.abspath(dropbox)
+    destination_path = os.path.abspath(os.path.join(validation_path, audio_file))
+    if os.path.normcase(source_path) != os.path.normcase(destination_path):
+        shutil.copy2(source_path, destination_path)
+    gr.Info(
+        i18n(
+            "The validation audio was added successfully. Please preprocess and extract again."
+        )
+    )
+    return None
 
 
 # Export
@@ -408,12 +444,19 @@ def train_tab():
             allow_custom_value=True,
             interactive=True,
         )
-        dataset_creator = gr.Checkbox(
-            label=i18n("Dataset Creator"),
-            value=False,
-            interactive=True,
-            visible=True,
-        )
+        with gr.Row():
+            dataset_creator = gr.Checkbox(
+                label=i18n("Dataset Creator"),
+                value=False,
+                interactive=True,
+                visible=True,
+            )
+            validation_audio_enabled = gr.Checkbox(
+                label=i18n("Validation Audio"),
+                value=False,
+                interactive=True,
+                visible=True,
+            )
         with gr.Column(visible=False) as dataset_creator_settings:
             with gr.Accordion(i18n("Dataset Creator")):
                 dataset_name = gr.Textbox(
@@ -424,6 +467,20 @@ def train_tab():
                 )
                 upload_audio_dataset = gr.File(
                     label=i18n("Upload Audio Dataset"),
+                    type="filepath",
+                    interactive=True,
+                )
+        with gr.Column(visible=False) as validation_audio_settings:
+            with gr.Accordion(i18n("Validation Audio")):
+                gr.Markdown(
+                    i18n(
+                        "Add a clean external validation clip to the selected dataset. "
+                        "Clips of 3 seconds are preferred and clips under 2 seconds are ignored."
+                    )
+                )
+                upload_validation_audio = gr.File(
+                    label=i18n("Upload Validation Audio"),
+                    file_types=[".wav", ".mp3", ".flac", ".ogg"],
                     type="filepath",
                     interactive=True,
                 )
@@ -1028,10 +1085,20 @@ def train_tab():
                 inputs=[dataset_creator],
                 outputs=[dataset_creator_settings],
             )
+            validation_audio_enabled.change(
+                fn=toggle_visible,
+                inputs=[validation_audio_enabled],
+                outputs=[validation_audio_settings],
+            )
             upload_audio_dataset.upload(
                 fn=save_drop_dataset_audio,
                 inputs=[upload_audio_dataset, dataset_name],
                 outputs=[upload_audio_dataset, dataset_path],
+            )
+            upload_validation_audio.upload(
+                fn=save_drop_validation_audio,
+                inputs=[upload_validation_audio, dataset_path],
+                outputs=[upload_validation_audio],
             )
             pretrained.change(
                 fn=toggle_pretrained,

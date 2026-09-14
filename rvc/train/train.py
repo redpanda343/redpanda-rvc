@@ -48,6 +48,7 @@ from rvc.train.mos_validation import (
 )
 from rvc.train.process.extract_model import extract_model
 from rvc.train.timbre_validation import ECAPATimbreValidator
+from rvc.train.validation_data import prepare_validation_reference
 
 # Parse command line arguments
 model_name = sys.argv[1]
@@ -65,65 +66,6 @@ def _speaker_id(item):
         return int(item[4])
     except (TypeError, ValueError):
         return 0
-
-
-def _timbre_reference_from_samples(samples, collate_fn, device):
-    info = collate_fn(samples)
-    phone, phone_lengths, pitch, pitchf, _, _, wave, wave_lengths, sid = info
-    inference_inputs = (
-        phone.to(device),
-        phone_lengths.to(device),
-        pitch.to(device),
-        pitchf.to(device),
-        sid.to(device),
-    )
-    return inference_inputs, wave, wave_lengths, sid
-
-
-def build_timbre_reference(dataset, collate_fn, device, max_samples=4):
-    candidates = []
-    for index, item in enumerate(dataset.audiopaths_and_text):
-        audio_path = item[0]
-        if "mute" in os.path.basename(audio_path).lower():
-            continue
-        candidates.append((_speaker_id(item), audio_path, index))
-    candidates.sort()
-
-    selected = []
-    selected_indices = set()
-    selected_speakers = set()
-    for speaker_id, _, index in candidates:
-        if speaker_id in selected_speakers:
-            continue
-        sample = dataset[index]
-        if sample[1].abs().mean().item() <= 1e-4:
-            continue
-        selected.append(sample)
-        selected_indices.add(index)
-        selected_speakers.add(speaker_id)
-        if len(selected) == max_samples:
-            break
-
-    if len(selected) < max_samples:
-        for _, _, index in candidates:
-            if index in selected_indices:
-                continue
-            sample = dataset[index]
-            if sample[1].abs().mean().item() <= 1e-4:
-                continue
-            selected.append(sample)
-            if len(selected) == max_samples:
-                break
-
-    if not selected:
-        raise RuntimeError("No non-silent training audio is available")
-
-    return _timbre_reference_from_samples(selected, collate_fn, device)
-
-
-def _dataset_signature(items):
-    serialized = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _validation_sort_key(seed, value):
@@ -173,178 +115,6 @@ def build_timbre_enrollment(
 
     info = collate_fn(selected)
     return info[6], info[7], info[8]
-
-
-def _select_held_out_paths(
-    dataset,
-    seed,
-    max_samples=16,
-    max_per_speaker=4,
-    min_samples_per_speaker=8,
-):
-    groups = defaultdict(list)
-    for index, item in enumerate(dataset.audiopaths_and_text):
-        audio_path = item[0]
-        if "mute" in os.path.basename(audio_path).lower():
-            continue
-        groups[_speaker_id(item)].append((audio_path, index))
-
-    speaker_order = sorted(
-        groups,
-        key=lambda speaker_id: _validation_sort_key(seed, f"speaker:{speaker_id}"),
-    )
-    candidates = {}
-    targets = {}
-    for speaker_id in speaker_order:
-        group = sorted(
-            groups[speaker_id],
-            key=lambda item: _validation_sort_key(seed, item[0]),
-        )
-        available = len(group) - min_samples_per_speaker
-        if available < 1:
-            continue
-        target = max(1, (len(group) + 19) // 20)
-        candidates[speaker_id] = group
-        targets[speaker_id] = min(target, max_per_speaker, available)
-
-    preferred = {}
-    fallback = {}
-    for speaker_id, group in candidates.items():
-        preferred[speaker_id] = []
-        fallback[speaker_id] = []
-        for audio_path, index in group:
-            try:
-                sample = dataset[index]
-            except Exception:
-                continue
-            if sample[1].abs().mean().item() <= 1e-4:
-                continue
-            sample_length = sample[1].size(-1)
-            if sample_length >= int(3 * dataset.sample_rate):
-                preferred[speaker_id].append(audio_path)
-                if len(preferred[speaker_id]) == targets[speaker_id]:
-                    break
-            elif sample_length >= int(2 * dataset.sample_rate):
-                fallback[speaker_id].append(audio_path)
-        needed = targets[speaker_id] - len(preferred[speaker_id])
-        if needed > 0:
-            preferred[speaker_id].extend(fallback[speaker_id][:needed])
-
-    selected = []
-    cursors = defaultdict(int)
-    while len(selected) < max_samples:
-        progress = False
-        for speaker_id in speaker_order:
-            if speaker_id not in preferred:
-                continue
-            if cursors[speaker_id] >= len(preferred[speaker_id]):
-                continue
-            selected.append(preferred[speaker_id][cursors[speaker_id]])
-            cursors[speaker_id] += 1
-            progress = True
-            if len(selected) == max_samples:
-                break
-        if not progress:
-            break
-    return selected
-
-
-def prepare_held_out_timbre_reference(
-    dataset,
-    collate_fn,
-    device,
-    experiment_dir,
-    rank,
-    seed,
-    minimum_training_samples,
-):
-    manifest_path = os.path.join(experiment_dir, "held_out_validation.json")
-    signature = _dataset_signature(dataset.audiopaths_and_text)
-    manifest_box = [None]
-    if rank == 0:
-        manifest = None
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as file:
-                candidate = json.load(file)
-            if (
-                isinstance(candidate, dict)
-                and candidate.get("version") == 4
-                and candidate.get("dataset_signature") == signature
-                and candidate.get("seed") == seed
-                and candidate.get("minimum_training_samples")
-                == minimum_training_samples
-                and isinstance(candidate.get("audio_paths"), list)
-                and all(
-                    "mute" not in os.path.basename(path).lower()
-                    for path in candidate["audio_paths"]
-                )
-            ):
-                manifest = candidate
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
-
-        if manifest is None:
-            held_out_paths = _select_held_out_paths(dataset, seed)
-            allowed = max(0, len(dataset) - minimum_training_samples)
-            held_out_paths = held_out_paths[:allowed]
-            manifest = {
-                "version": 4,
-                "dataset_signature": signature,
-                "seed": seed,
-                "minimum_training_samples": minimum_training_samples,
-                "audio_paths": held_out_paths,
-            }
-            try:
-                temporary_path = f"{manifest_path}.{os.getpid()}.tmp"
-                with open(temporary_path, "w", encoding="utf-8") as file:
-                    json.dump(manifest, file, ensure_ascii=False, indent=2)
-                os.replace(temporary_path, manifest_path)
-            except OSError as error:
-                print(f"Could not persist the held-out validation split: {error}")
-        manifest_box[0] = manifest
-
-    dist.broadcast_object_list(manifest_box, src=0)
-    held_out_paths = set(manifest_box[0].get("audio_paths", []))
-    if not held_out_paths:
-        return None, False
-
-    training_items = []
-    training_lengths = []
-    validation_items = []
-    for item, length in zip(dataset.audiopaths_and_text, dataset.lengths):
-        if item[0] in held_out_paths:
-            validation_items.append(item)
-        else:
-            training_items.append(item)
-            training_lengths.append(length)
-    dataset.audiopaths_and_text = training_items
-    dataset.lengths = training_lengths
-
-    if rank != 0:
-        return None, True
-
-    samples = []
-    for item in validation_items:
-        try:
-            sample = dataset.get_audio_text_pair(item)
-        except Exception as error:
-            print(f"Could not load held-out validation sample '{item[0]}': {error}")
-            continue
-        if (
-            sample[1].abs().mean().item() > 1e-4
-            and sample[1].size(-1) >= int(2 * dataset.sample_rate)
-        ):
-            samples.append(sample)
-
-    if not samples:
-        return None, False
-
-    print(
-        f"Held-out validation uses {len(samples)} clips, preferring at least 3 seconds "
-        "and falling back to at least 2 seconds; "
-        f"{len(dataset)} clips remain for training."
-    )
-    return _timbre_reference_from_samples(samples, collate_fn, device), True
 
 
 def _strtobool(val):
@@ -723,19 +493,8 @@ def run(
 
     train_dataset = TextAudioLoaderMultiNSFsid(config.data)
     collate_fn = TextAudioCollateMultiNSFsid()
-    timbre_reference, timbre_is_held_out = prepare_held_out_timbre_reference(
-        train_dataset,
-        collate_fn,
-        device,
-        experiment_dir,
-        rank,
-        config.train.seed,
-        max(8, batch_size * n_gpus * 3),
-    )
+    timbre_reference = None
     audio_reference = None
-    if rank == 0 and timbre_is_held_out and timbre_reference is not None:
-        audio_reference = tuple(value[:1] for value in timbre_reference[0])
-        print("TensorBoard audio validation uses one held-out dataset clip.")
     train_sampler = DistributedBucketSampler(
         train_dataset,
         batch_size,
@@ -789,6 +548,24 @@ def run(
     # update config before the model init
     print(f"Initializing the generator with {spk_dim} speakers.")
     config.model.spk_embed_dim = spk_dim
+
+    if rank == 0:
+        try:
+            timbre_reference = prepare_validation_reference(
+                experiment_dir,
+                device,
+                config.train.seed,
+                dataset_spk_dim,
+                config.data.sample_rate,
+                config.data.hop_length,
+                config.model.text_enc_hidden_dim,
+            )
+            if timbre_reference is not None:
+                audio_reference = tuple(value[:1] for value in timbre_reference[0])
+                print("TensorBoard audio validation uses one external validation clip.")
+        except Exception as error:
+            print(f"External validation disabled: {error}")
+            timbre_reference = None
 
     # Initialize models and optimizers
     from rvc.lib.algorithm.discriminators import MultiPeriodDiscriminator
@@ -941,31 +718,20 @@ def run(
     cache = []
 
     timbre_validator = None
-    if rank == 0:
+    if rank == 0 and timbre_reference is not None:
         try:
             timbre_model_path = os.path.join(
                 "rvc", "models", "pretraineds", "ecapa_tdnn", "pretrain.model"
             )
             timbre_validator = ECAPATimbreValidator(timbre_model_path)
-            if timbre_reference is None:
-                timbre_reference = build_timbre_reference(
-                    train_dataset, collate_fn, device
+            enrollment_wave, enrollment_lengths, enrollment_speakers = (
+                build_timbre_enrollment(
+                    train_dataset,
+                    collate_fn,
+                    timbre_reference[3],
+                    config.train.seed,
                 )
-                timbre_is_held_out = False
-                print("ECAPA validation is using the training-reference fallback.")
-            if timbre_is_held_out:
-                enrollment_wave, enrollment_lengths, enrollment_speakers = (
-                    build_timbre_enrollment(
-                        train_dataset,
-                        collate_fn,
-                        timbre_reference[3],
-                        config.train.seed,
-                    )
-                )
-            else:
-                enrollment_wave = timbre_reference[1]
-                enrollment_lengths = timbre_reference[2]
-                enrollment_speakers = timbre_reference[3]
+            )
             timbre_validator.set_references(
                 enrollment_wave,
                 enrollment_lengths,
@@ -980,7 +746,7 @@ def run(
             timbre_validator = None
 
     mos_validator = None
-    if rank == 0 and timbre_is_held_out and timbre_reference is not None:
+    if rank == 0 and timbre_reference is not None:
         try:
             mos_model_paths = [
                 os.path.join(
@@ -1037,7 +803,6 @@ def run(
                 timbre_validator,
                 mos_validator,
                 timbre_reference,
-                timbre_is_held_out,
                 fn_mel_loss,
                 scaler,
                 inference_exporter,
@@ -1070,7 +835,6 @@ def train_and_evaluate(
     timbre_validator,
     mos_validator,
     timbre_reference,
-    timbre_is_held_out,
     fn_mel_loss,
     scaler,
     inference_exporter,
@@ -1409,7 +1173,7 @@ def train_and_evaluate(
                                         *timbre_reference[0]
                                     )
                                 except Exception as error:
-                                    print(f"Held-out validation generation failed: {error}")
+                                    print(f"External validation generation failed: {error}")
                             if audio_reference is not None:
                                 if timbre_o is not None:
                                     audio_o = timbre_o[:1]
