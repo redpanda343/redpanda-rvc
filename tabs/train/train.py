@@ -474,8 +474,8 @@ def train_tab():
             with gr.Accordion(i18n("Validation Audio")):
                 gr.Markdown(
                     i18n(
-                        "Add a clean external validation clip to the selected dataset. "
-                        "Clips of 3 seconds are preferred and clips under 2 seconds are ignored."
+                        "For reliable, efficient validation, use 1 to 3 clean clips "
+                        "between 2 and 20 seconds. Additional or longer clips are unnecessary."
                     )
                 )
                 upload_validation_audio = gr.File(
