@@ -207,30 +207,41 @@ def _select_held_out_paths(
         candidates[speaker_id] = group
         targets[speaker_id] = min(target, max_per_speaker, available)
 
+    preferred = {}
+    fallback = {}
+    for speaker_id, group in candidates.items():
+        preferred[speaker_id] = []
+        fallback[speaker_id] = []
+        for audio_path, index in group:
+            try:
+                sample = dataset[index]
+            except Exception:
+                continue
+            if sample[1].abs().mean().item() <= 1e-4:
+                continue
+            sample_length = sample[1].size(-1)
+            if sample_length >= int(3 * dataset.sample_rate):
+                preferred[speaker_id].append(audio_path)
+                if len(preferred[speaker_id]) == targets[speaker_id]:
+                    break
+            elif sample_length >= int(2 * dataset.sample_rate):
+                fallback[speaker_id].append(audio_path)
+        needed = targets[speaker_id] - len(preferred[speaker_id])
+        if needed > 0:
+            preferred[speaker_id].extend(fallback[speaker_id][:needed])
+
     selected = []
     cursors = defaultdict(int)
-    counts = defaultdict(int)
     while len(selected) < max_samples:
         progress = False
         for speaker_id in speaker_order:
-            if speaker_id not in candidates or counts[speaker_id] >= targets[speaker_id]:
+            if speaker_id not in preferred:
                 continue
-            group = candidates[speaker_id]
-            while cursors[speaker_id] < len(group):
-                audio_path, index = group[cursors[speaker_id]]
-                cursors[speaker_id] += 1
-                try:
-                    sample = dataset[index]
-                except Exception:
-                    continue
-                if sample[1].abs().mean().item() <= 1e-4:
-                    continue
-                if sample[1].size(-1) < int(2 * dataset.sample_rate):
-                    continue
-                selected.append(audio_path)
-                counts[speaker_id] += 1
-                progress = True
-                break
+            if cursors[speaker_id] >= len(preferred[speaker_id]):
+                continue
+            selected.append(preferred[speaker_id][cursors[speaker_id]])
+            cursors[speaker_id] += 1
+            progress = True
             if len(selected) == max_samples:
                 break
         if not progress:
@@ -257,7 +268,7 @@ def prepare_held_out_timbre_reference(
                 candidate = json.load(file)
             if (
                 isinstance(candidate, dict)
-                and candidate.get("version") == 3
+                and candidate.get("version") == 4
                 and candidate.get("dataset_signature") == signature
                 and candidate.get("seed") == seed
                 and candidate.get("minimum_training_samples")
@@ -277,7 +288,7 @@ def prepare_held_out_timbre_reference(
             allowed = max(0, len(dataset) - minimum_training_samples)
             held_out_paths = held_out_paths[:allowed]
             manifest = {
-                "version": 3,
+                "version": 4,
                 "dataset_signature": signature,
                 "seed": seed,
                 "minimum_training_samples": minimum_training_samples,
@@ -329,7 +340,8 @@ def prepare_held_out_timbre_reference(
         return None, False
 
     print(
-        f"Held-out validation uses {len(samples)} clips of at least 2 seconds; "
+        f"Held-out validation uses {len(samples)} clips, preferring at least 3 seconds "
+        "and falling back to at least 2 seconds; "
         f"{len(dataset)} clips remain for training."
     )
     return _timbre_reference_from_samples(samples, collate_fn, device), True
