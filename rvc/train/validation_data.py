@@ -11,6 +11,12 @@ VALIDATION_AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 VALIDATION_MANIFEST_VERSION = 1
 
 
+def should_run_external_validation(reference, timbre_validator, mos_validator):
+    return reference is not None and (
+        timbre_validator is not None or mos_validator is not None
+    )
+
+
 def _sort_key(seed, value):
     return hashlib.sha256(f"{seed}:{value}".encode("utf-8")).digest()
 

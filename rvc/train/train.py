@@ -48,7 +48,10 @@ from rvc.train.mos_validation import (
 )
 from rvc.train.process.extract_model import extract_model
 from rvc.train.timbre_validation import ECAPATimbreValidator
-from rvc.train.validation_data import prepare_validation_reference
+from rvc.train.validation_data import (
+    prepare_validation_reference,
+    should_run_external_validation,
+)
 
 # Parse command line arguments
 model_name = sys.argv[1]
@@ -1154,33 +1157,39 @@ def train_and_evaluate(
                 ),
                 "all/mel": plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
             }
-            inference_model = net_g.module if hasattr(net_g, "module") else net_g
-            inference_model.eval()
-            rng_devices = [device_id] if device.type == "cuda" else []
             audio_o = None
             timbre_o = None
-            try:
-                with deterministic_validation_scope(
-                    config.train.seed, cuda_devices=rng_devices
-                ):
-                    with torch.amp.autocast(
-                        device_type="cuda", enabled=False
+            if should_run_external_validation(
+                timbre_reference, timbre_validator, mos_validator
+            ):
+                inference_model = net_g.module if hasattr(net_g, "module") else net_g
+                inference_model.eval()
+                rng_devices = [device_id] if device.type == "cuda" else []
+                try:
+                    with deterministic_validation_scope(
+                        config.train.seed, cuda_devices=rng_devices
                     ):
-                        with torch.inference_mode():
-                            if timbre_validator is not None or mos_validator is not None:
+                        with torch.amp.autocast(
+                            device_type="cuda", enabled=False
+                        ):
+                            with torch.inference_mode():
                                 try:
                                     timbre_o, *_ = inference_model.infer(
                                         *timbre_reference[0]
                                     )
                                 except Exception as error:
-                                    print(f"External validation generation failed: {error}")
-                            if audio_reference is not None:
-                                if timbre_o is not None:
-                                    audio_o = timbre_o[:1]
-                                else:
-                                    audio_o, *_ = inference_model.infer(*audio_reference)
-            finally:
-                inference_model.train()
+                                    print(
+                                        f"External validation generation failed: {error}"
+                                    )
+                                if audio_reference is not None:
+                                    if timbre_o is not None:
+                                        audio_o = timbre_o[:1]
+                                    else:
+                                        audio_o, *_ = inference_model.infer(
+                                            *audio_reference
+                                        )
+                finally:
+                    inference_model.train()
 
             generated_lengths = None
             if timbre_o is not None:
