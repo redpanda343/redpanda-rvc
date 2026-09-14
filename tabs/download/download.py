@@ -22,6 +22,59 @@ i18n = I18nAuto()
 
 gradio_temp_dir = os.path.join(tempfile.gettempdir(), "gradio")
 
+PRETRAINED_MODELS = {
+    "Legacy core 1.5 NEW": [
+        (
+            "https://huggingface.co/lyery/test/resolve/main/G_2333333%20%286%29.pth",
+            "G_2333333 (6).pth",
+        ),
+        (
+            "https://huggingface.co/lyery/test/resolve/main/D_2333333%20%286%29.pth",
+            "D_2333333 (6).pth",
+        ),
+    ],
+    "Legacy core 1.6": [
+        (
+            "https://huggingface.co/lyery/legacy_core1.6/resolve/main/G_11.pth",
+            "G_11.pth",
+        ),
+        (
+            "https://huggingface.co/lyery/legacy_core1.6/resolve/main/D_11.pth",
+            "D_11.pth",
+        ),
+    ],
+    "Legacy core 1.5 OLD 32k": [
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/G_15.pth",
+            "G_15.pth",
+        ),
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/D_15.pth",
+            "D_15.pth",
+        ),
+    ],
+    "Legacy core 1.5 OLD 40k": [
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/G_40k.pth",
+            "G_40k.pth",
+        ),
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/D_40k.pth",
+            "D_40k.pth",
+        ),
+    ],
+    "Legacy core 1.5 OLD 48k": [
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/G_48k.pth",
+            "G_48k.pth",
+        ),
+        (
+            "https://huggingface.co/lyery/mode4/resolve/main/D_48k.pth",
+            "D_48k.pth",
+        ),
+    ],
+}
+
 if os.path.exists(gradio_temp_dir):
     shutil.rmtree(gradio_temp_dir)
 
@@ -105,18 +158,82 @@ def get_pretrained_sample_rates(model):
 
 
 def get_file_size(url):
-    response = requests.head(url)
-    return int(response.headers.get("content-length", 0))
+    response = None
+    try:
+        response = requests.head(
+            url, allow_redirects=True, timeout=(10, 30)
+        )
+        response.raise_for_status()
+        return int(response.headers.get("content-length", 0))
+    except requests.RequestException:
+        return 0
+    finally:
+        if response is not None:
+            response.close()
 
 
 def download_file(url, destination_path, progress_bar):
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-    response = requests.get(url, stream=True)
-    block_size = 1024
-    with open(destination_path, "wb") as file:
-        for data in response.iter_content(block_size):
-            file.write(data)
-            progress_bar.update(len(data))
+    temporary_path = f"{destination_path}.part"
+    response = requests.get(
+        url,
+        headers={"Accept-Encoding": "identity"},
+        stream=True,
+        timeout=(10, 120),
+    )
+    try:
+        response.raise_for_status()
+        expected_size = int(response.headers.get("content-length", 0))
+        downloaded_size = 0
+        with open(temporary_path, "wb") as file:
+            for data in response.iter_content(1024 * 1024):
+                if data:
+                    file.write(data)
+                    downloaded_size += len(data)
+                    progress_bar.update(len(data))
+        if expected_size and downloaded_size != expected_size:
+            raise IOError(
+                f"Incomplete download for {os.path.basename(destination_path)}"
+            )
+        os.replace(temporary_path, destination_path)
+    finally:
+        response.close()
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def download_pretrained_presets(selected_models):
+    if not selected_models:
+        raise gr.Error(i18n("Select at least one pretrained model."))
+
+    if isinstance(selected_models, str):
+        selected_models = [selected_models]
+
+    save_path = os.path.join(now_dir, "rvc", "models", "pretraineds", "custom")
+    tasks = [
+        (url, os.path.join(save_path, filename))
+        for model in selected_models
+        for url, filename in PRETRAINED_MODELS[model]
+    ]
+
+    gr.Info(i18n("Downloading pretrains..."))
+    with tqdm(
+        total=sum(get_file_size(url) for url, _ in tasks),
+        unit="iB",
+        unit_scale=True,
+        desc="Downloading pretrains",
+    ) as progress_bar:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(download_file, url, path, progress_bar)
+                for url, path in tasks
+            ]
+            for future in futures:
+                future.result()
+
+    message = i18n("Pretrains downloaded successfully!")
+    gr.Info(message)
+    return message
 
 
 def download_pretrained_model(model, sample_rate, url_g="", url_d=""):
@@ -212,6 +329,24 @@ def download_tab():
             fn=_download_with_toast,
             inputs=[model_link],
             outputs=[model_download_output_info],
+        )
+        gr.Markdown(value=i18n("## Download Pretrains"))
+        pretrained_models = gr.Dropdown(
+            choices=list(PRETRAINED_MODELS),
+            label=i18n("Pretrained Models"),
+            info=i18n("Select one or more pretrained model sets."),
+            multiselect=True,
+        )
+        pretrained_download_output_info = gr.Textbox(
+            label=i18n("Output Information"),
+            value="",
+            interactive=False,
+        )
+        pretrained_download_button = gr.Button(i18n("Download Pretrains"))
+        pretrained_download_button.click(
+            fn=download_pretrained_presets,
+            inputs=[pretrained_models],
+            outputs=[pretrained_download_output_info],
         )
         gr.Markdown(value=i18n("## Drop files"))
         dropbox = gr.File(
