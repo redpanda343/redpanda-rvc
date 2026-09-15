@@ -8,6 +8,8 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 
+from rvc.train.validation_data import MAXIMUM_VALIDATION_SECONDS
+
 
 @contextmanager
 def deterministic_validation_scope(seed, cuda_devices=None):
@@ -99,7 +101,7 @@ class UTMOSv2Validator:
         length_values = lengths.detach().cpu().tolist()
         speaker_values = speaker_ids.detach().cpu().tolist()
         minimum_length = int(2 * sample_rate)
-        maximum_length = int(3 * sample_rate)
+        maximum_length = int(MAXIMUM_VALIDATION_SECONDS * sample_rate)
         clips = []
         speakers = []
         for index, requested_length in enumerate(length_values):

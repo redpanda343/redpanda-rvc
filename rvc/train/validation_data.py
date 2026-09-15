@@ -9,12 +9,61 @@ import torch
 
 VALIDATION_AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 VALIDATION_MANIFEST_VERSION = 1
+MINIMUM_VALIDATION_SECONDS = 2
+PREFERRED_VALIDATION_SECONDS = 10
+MAXIMUM_VALIDATION_SECONDS = 20
+VALIDATION_INFERENCE_BATCH_SECONDS = 40
 
 
 def should_run_external_validation(reference, timbre_validator, mos_validator):
     return reference is not None and (
         timbre_validator is not None or mos_validator is not None
     )
+
+
+def infer_validation_audio(model, inference_inputs, sample_rate, hop_length):
+    sample_count = int(inference_inputs[0].size(0))
+    if sample_count < 1:
+        raise ValueError("No external validation inputs are available")
+    maximum_frames = max(1, int(inference_inputs[1].max().item()))
+    maximum_seconds = maximum_frames * int(hop_length) / int(sample_rate)
+    batch_size = max(
+        1,
+        min(
+            sample_count,
+            int(VALIDATION_INFERENCE_BATCH_SECONDS // maximum_seconds),
+        ),
+    )
+    device = inference_inputs[0].device
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+    while True:
+        generated = []
+        try:
+            for start in range(0, sample_count, batch_size):
+                batch = tuple(
+                    value[start : start + batch_size] for value in inference_inputs
+                )
+                output, *_ = model.infer(*batch)
+                generated.append(output.detach().cpu())
+                del output, batch
+            return torch.cat(generated, dim=0)
+        except RuntimeError as error:
+            if (
+                device.type != "cuda"
+                or batch_size == 1
+                or "out of memory" not in str(error).lower()
+            ):
+                raise
+            generated.clear()
+            torch.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state, device)
+            torch.cuda.empty_cache()
+            batch_size = max(1, batch_size // 2)
+            print(
+                "External validation generation ran out of VRAM; retrying with "
+                f"batch {batch_size}."
+            )
 
 
 def _sort_key(seed, value):
@@ -219,8 +268,9 @@ def prepare_validation_reference(
         raise RuntimeError("External validation manifest contains no audio entries")
 
     frames_per_second = sample_rate / hop_length
-    minimum_frames = int(round(2 * frames_per_second))
-    maximum_frames = int(round(3 * frames_per_second))
+    minimum_frames = int(round(MINIMUM_VALIDATION_SECONDS * frames_per_second))
+    preferred_frames = int(round(PREFERRED_VALIDATION_SECONDS * frames_per_second))
+    maximum_frames = int(round(MAXIMUM_VALIDATION_SECONDS * frames_per_second))
     sources = []
     for entry in entries:
         source = _load_entry(
@@ -234,11 +284,11 @@ def prepare_validation_reference(
         if source is not None:
             sources.append(source)
     preferred = sorted(
-        (source for source in sources if source["length"] >= maximum_frames),
+        (source for source in sources if source["length"] >= preferred_frames),
         key=lambda source: _sort_key(seed, source["audio_path"]),
     )
     fallback = sorted(
-        (source for source in sources if source["length"] < maximum_frames),
+        (source for source in sources if source["length"] < preferred_frames),
         key=lambda source: _sort_key(seed, source["audio_path"]),
     )
     ordered_sources = (preferred + fallback)[:max_per_speaker]
@@ -286,7 +336,7 @@ def prepare_validation_reference(
     target_count = len(set(speaker_ids.tolist()))
     print(
         f"External validation uses {len(selected)} probes from {source_count} source "
-        f"clips across {target_count} target speakers. Three-second clips are preferred "
-        "and two-second clips are fallback only."
+        f"clips across {target_count} target speakers. Ten-to-twenty-second clips are "
+        "preferred and clips down to two seconds remain eligible."
     )
     return inference_inputs, None, None, speaker_ids

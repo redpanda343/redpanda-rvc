@@ -49,6 +49,7 @@ from rvc.train.mos_validation import (
 from rvc.train.process.extract_model import extract_model
 from rvc.train.timbre_validation import ECAPATimbreValidator
 from rvc.train.validation_data import (
+    infer_validation_audio,
     prepare_validation_reference,
     should_run_external_validation,
 )
@@ -1172,8 +1173,11 @@ def train_and_evaluate(
                         ):
                             with torch.inference_mode():
                                 try:
-                                    timbre_o, *_ = inference_model.infer(
-                                        *timbre_reference[0]
+                                    timbre_o = infer_validation_audio(
+                                        inference_model,
+                                        timbre_reference[0],
+                                        config.data.sample_rate,
+                                        config.data.hop_length,
                                     )
                                 except Exception as error:
                                     print(
