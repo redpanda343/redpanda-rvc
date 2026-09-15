@@ -19,9 +19,8 @@ def deterministic_validation_scope(seed, cuda_devices=None):
         torch.is_deterministic_algorithms_warn_only_enabled(),
         torch.backends.cudnn.benchmark,
         torch.backends.cudnn.deterministic,
-        torch.backends.cuda.matmul.allow_tf32,
-        torch.backends.cudnn.allow_tf32,
-        torch.get_float32_matmul_precision(),
+        torch.backends.cuda.matmul.fp32_precision,
+        torch.backends.cudnn.fp32_precision,
     )
     devices = list(cuda_devices or [])
     try:
@@ -32,9 +31,8 @@ def deterministic_validation_scope(seed, cuda_devices=None):
             torch.use_deterministic_algorithms(True)
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
-            torch.backends.cuda.matmul.allow_tf32 = False
-            torch.backends.cudnn.allow_tf32 = False
-            torch.set_float32_matmul_precision("highest")
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+            torch.backends.cudnn.fp32_precision = "ieee"
             try:
                 yield
             finally:
@@ -43,9 +41,8 @@ def deterministic_validation_scope(seed, cuda_devices=None):
                     deterministic_warn_only,
                     cudnn_benchmark,
                     cudnn_deterministic,
-                    matmul_allow_tf32,
-                    cudnn_allow_tf32,
                     matmul_precision,
+                    cudnn_precision,
                 ) = previous_settings
                 torch.use_deterministic_algorithms(
                     deterministic_algorithms,
@@ -53,9 +50,8 @@ def deterministic_validation_scope(seed, cuda_devices=None):
                 )
                 torch.backends.cudnn.benchmark = cudnn_benchmark
                 torch.backends.cudnn.deterministic = cudnn_deterministic
-                torch.backends.cuda.matmul.allow_tf32 = matmul_allow_tf32
-                torch.backends.cudnn.allow_tf32 = cudnn_allow_tf32
-                torch.set_float32_matmul_precision(matmul_precision)
+                torch.backends.cuda.matmul.fp32_precision = matmul_precision
+                torch.backends.cudnn.fp32_precision = cudnn_precision
     finally:
         random.setstate(python_state)
         np.random.set_state(numpy_state)
