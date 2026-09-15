@@ -20,7 +20,7 @@ from rvc.lib.tools.launch_tensorboard import launch_tensorboard_pipeline
 from rvc.lib.tools.model_download import model_download_pipeline
 from rvc.lib.tools.prerequisites_download import prequisites_download_pipeline
 from rvc.train.process.checkpoint_exporter import export_generator_checkpoint
-from rvc.train.process.model_blender import model_blender
+from rvc.train.process.model_blender import model_blender as blend_models
 from rvc.train.process.model_information import model_information
 from rvc.train.process.training_control import start_training
 
@@ -856,7 +856,7 @@ def run_model_information_script(pth_path: str):
 def run_model_blender_script(
     model_name: str, pth_path_1: str, pth_path_2: str, ratio: float
 ):
-    message, model_blended = model_blender(model_name, pth_path_1, pth_path_2, ratio)
+    message, model_blended = blend_models(model_name, pth_path_1, pth_path_2, ratio)
     return message, model_blended
 
 
