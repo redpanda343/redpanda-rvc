@@ -208,17 +208,15 @@ class UTMOSv2Validator:
         fold_seed = (self.seed + int(fold)) % (2**63 - 1)
         model.eval().float().to(device)
         predictions = []
-        for clip in clips:
-            prepared_clip = self._resample_clip(model, clip, sample_rate)
-            with deterministic_validation_scope(
-                fold_seed, cuda_devices=cuda_devices
-            ):
+        with deterministic_validation_scope(fold_seed, cuda_devices=cuda_devices):
+            for clip in clips:
+                prepared_clip = self._resample_clip(model, clip, sample_rate)
                 inputs = self._prepare_tta_inputs(
                     model, prepared_clip, self.repetitions
                 )
                 prediction = self._score_tta(model, inputs, device)
-            del inputs
-            predictions.append(prediction)
+                del inputs
+                predictions.append(prediction)
         return predictions
 
     def _score_fold(self, model, clips, sample_rate, fold):
