@@ -47,6 +47,7 @@ from rvc.train.mos_validation import (
     deterministic_validation_scope,
 )
 from rvc.train.process.extract_model import extract_model
+from rvc.train.speaker_embeddings import match_speaker_embedding_scale
 from rvc.train.timbre_validation import ECAPATimbreValidator
 from rvc.train.validation_data import (
     infer_validation_audio,
@@ -665,8 +666,9 @@ def run(
                         raise KeyError(
                             "The pretrained generator has no speaker embedding."
                         )
-                    ckpt["emb_g.weight"] = (
-                        target_net_g.emb_g.weight.detach().cpu().clone()
+                    ckpt["emb_g.weight"] = match_speaker_embedding_scale(
+                        target_net_g.emb_g.weight.detach().cpu(),
+                        ckpt["emb_g.weight"],
                     )
                 target_net_g.load_state_dict(ckpt)
                 del ckpt
