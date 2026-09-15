@@ -136,7 +136,7 @@ class UTMOSv2Validator:
         return audio.numpy().astype(np.float32, copy=False)
 
     @staticmethod
-    def _score_one(model, clip, device):
+    def _prepare_tta_inputs(model, clip, repetitions):
         from utmosv2.dataset._schema import InMemoryData
         from utmosv2.utils import get_dataset
 
@@ -147,39 +147,86 @@ class UTMOSv2Validator:
         initial_state = getattr(model._cfg.dataset, "remove_silent_section", None)
         model._cfg.dataset.remove_silent_section = False
         try:
-            sample = get_dataset(model._cfg, data, model._cfg.phase)[0]
+            dataset = get_dataset(model._cfg, data, model._cfg.phase)
+            samples = [dataset[0] for _ in range(repetitions)]
         finally:
             model._cfg.dataset.remove_silent_section = initial_state
-        inputs = [value.unsqueeze(0).to(device) for value in sample[:-1]]
-        with torch.inference_mode():
-            with torch.amp.autocast(device_type=device.type, enabled=False):
-                prediction = model(*inputs).reshape(-1)[0]
-        result = float(prediction.float().cpu().item())
-        del prediction, inputs
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        return result
+        return [
+            torch.stack([sample[index] for sample in samples])
+            for index in range(len(samples[0]) - 1)
+        ]
 
-    def _score_clips(self, model, clips, sample_rate, device):
+    @staticmethod
+    def _score_input_batches(model, inputs, device, batch_size):
+        predictions = []
+        with torch.inference_mode():
+            for start in range(0, inputs[0].shape[0], batch_size):
+                batch = [
+                    value[start : start + batch_size].to(device) for value in inputs
+                ]
+                with torch.amp.autocast(device_type=device.type, enabled=False):
+                    prediction = model(*batch).reshape(-1).float().cpu()
+                predictions.append(prediction)
+                del prediction, batch
+        return torch.cat(predictions)
+
+    def _score_tta(self, model, inputs, device):
+        repetitions = int(inputs[0].shape[0])
+        batch_sizes = [repetitions]
+        if device.type == "cuda":
+            batch_sizes.extend([max(1, repetitions // 2), 1])
+        batch_sizes = list(dict.fromkeys(batch_sizes))
+        for batch_size in batch_sizes:
+            try:
+                predictions = self._score_input_batches(
+                    model, inputs, device, batch_size
+                )
+            except RuntimeError as error:
+                if device.type != "cuda" or "out of memory" not in str(error).lower():
+                    raise
+                if batch_size == 1:
+                    raise
+                gc.collect()
+                torch.cuda.empty_cache()
+                next_batch_size = batch_sizes[batch_sizes.index(batch_size) + 1]
+                print(
+                    f"UTMOSv2 TTA batch {batch_size} ran out of VRAM; retrying "
+                    f"with batch {next_batch_size}."
+                )
+                continue
+            if not torch.isfinite(predictions).all():
+                raise RuntimeError("UTMOSv2 returned invalid TTA predictions")
+            result = float(predictions.mean().item())
+            del predictions
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            return result
+        raise RuntimeError("UTMOSv2 TTA inference failed")
+
+    def _score_clips(self, model, clips, sample_rate, device, fold):
         cuda_devices = [device.index or 0] if device.type == "cuda" else []
+        fold_seed = (self.seed + int(fold)) % (2**63 - 1)
         model.eval().float().to(device)
         predictions = []
         for clip in clips:
             prepared_clip = self._resample_clip(model, clip, sample_rate)
             with deterministic_validation_scope(
-                self.seed, cuda_devices=cuda_devices
+                fold_seed, cuda_devices=cuda_devices
             ):
-                repeated = [
-                    self._score_one(model, prepared_clip, device)
-                    for _ in range(self.repetitions)
-                ]
-            predictions.append(sum(repeated) / len(repeated))
+                inputs = self._prepare_tta_inputs(
+                    model, prepared_clip, self.repetitions
+                )
+                prediction = self._score_tta(model, inputs, device)
+            del inputs
+            predictions.append(prediction)
         return predictions
 
-    def _score_fold(self, model, clips, sample_rate):
+    def _score_fold(self, model, clips, sample_rate, fold):
         target_device = self.device
         try:
-            return self._score_clips(model, clips, sample_rate, target_device)
+            return self._score_clips(
+                model, clips, sample_rate, target_device, fold
+            )
         except RuntimeError as error:
             if target_device.type != "cuda" or "out of memory" not in str(error).lower():
                 raise
@@ -187,7 +234,7 @@ class UTMOSv2Validator:
             torch.cuda.empty_cache()
             print("UTMOSv2 GPU validation ran out of VRAM; retrying safely on CPU.")
             return self._score_clips(
-                model, clips, sample_rate, torch.device("cpu")
+                model, clips, sample_rate, torch.device("cpu"), fold
             )
 
     def score_batch(self, generated, lengths, speaker_ids, sample_rate):
@@ -200,7 +247,7 @@ class UTMOSv2Validator:
             model = self._load_model(model_path, fold)
             try:
                 fold_predictions.append(
-                    self._score_fold(model, clips, sample_rate)
+                    self._score_fold(model, clips, sample_rate, fold)
                 )
             finally:
                 model.to("cpu")
