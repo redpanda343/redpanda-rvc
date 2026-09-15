@@ -84,8 +84,7 @@ def get_files(type="model"):
     assert type in ("model", "index"), "Invalid type for get_files (models or index)"
     is_model = type == "model"
     exts = (".pth", ".onnx") if is_model else (".index",)
-    exclude_prefixes = ("G_", "D_") if is_model else ()
-    exclude_substr = None if is_model else "trained"
+    exclude_prefixes = ("G_", "D_") if is_model else ("trained_",)
 
     best = {}
     order = 0
@@ -94,9 +93,7 @@ def get_files(type="model"):
         for file in files:
             if not file.endswith(exts):
                 continue
-            if any(file.startswith(p) for p in exclude_prefixes):
-                continue
-            if exclude_substr and exclude_substr in file:
+            if file.startswith(exclude_prefixes):
                 continue
 
             full = os.path.join(root, file)

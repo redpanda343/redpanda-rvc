@@ -223,7 +223,7 @@ def get_index_list():
         os.path.relpath(os.path.join(dirpath, filename), now_dir)
         for dirpath, _, filenames in os.walk(models_path)
         for filename in filenames
-        if filename.endswith(".index") and "trained" not in filename
+        if filename.endswith(".index") and not filename.startswith("trained_")
     ]
 
 
