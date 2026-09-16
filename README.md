@@ -10,5 +10,5 @@ This project is a fork of [Applio](https://github.com/IAHispano/Applio), with ch
 
 - [Applio](https://github.com/IAHispano/Applio)
 - [FireRedVAD](https://github.com/FireRedTeam/FireRedVAD)
-- [UTMOSV2]([https://github.com/IAHispano/Applio](https://github.com/sarulab-speech/UTMOSv2)
+- [UTMOSV2]([https://github.com/IAHispano/Applio](https://github.com/sarulab-speech/UTMOSv2))
 - [ECAPA-TDNN](https://github.com/TaoRuijie/ECAPA-TDNN)
