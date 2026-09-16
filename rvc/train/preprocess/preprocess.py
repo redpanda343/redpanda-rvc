@@ -54,6 +54,7 @@ SUPPORTED_DATASET_FORMATS = {"wav", "wav_float32", "flac"}
 VALIDATION_AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
+GPU_PREPROCESS_MAX_WORKERS = 4
 FLAC_COMPRESSION_LEVEL = 0.0
 RESAMPLE_LOWPASS_FILTER_WIDTH = 128
 RESAMPLE_STREAM_CONTEXT_SECONDS = 1.0
@@ -295,6 +296,10 @@ def _get_audio_sample_rate(file: str) -> int:
         "-nostdin",
         "-v",
         "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
         "-i",
         _clean_audio_path(file),
         "-frames:a",
@@ -346,7 +351,9 @@ def load_audio_ffmpeg(file: str, sample_rate: int) -> np.ndarray:
         _ffmpeg_path(),
         "-nostdin",
         "-threads",
-        "0",
+        "1",
+        "-filter_threads",
+        "1",
         "-i",
         file,
         "-f",
@@ -451,7 +458,9 @@ def iter_audio_ffmpeg(file: str, sample_rate: int, block_seconds: float):
         _ffmpeg_path(),
         "-nostdin",
         "-threads",
-        "0",
+        "1",
+        "-filter_threads",
+        "1",
         "-i",
         file,
         "-f",
@@ -514,7 +523,9 @@ class FFmpegAudioStreamReader:
             _ffmpeg_path(),
             "-nostdin",
             "-threads",
-            "0",
+            "1",
+            "-filter_threads",
+            "1",
             "-i",
             _clean_audio_path(file),
             "-f",
@@ -933,7 +944,10 @@ class PreProcess:
                 )
         except Exception as error:
             print(f"Error processing audio: {error}")
-            if cut_preprocess == "Automatic" or self.dataset_format == "flac":
+            if cut_preprocess == "Automatic" or self.dataset_format in {
+                "flac",
+                "wav_float32",
+            }:
                 raise
         return audio_length, skipped_short
 
@@ -1058,7 +1072,6 @@ def preprocess_training_set(
         sys.exit(1)
     start_time = time.time()
     dataset_format = normalize_dataset_format(dataset_format)
-    print(f"Starting preprocess with {num_processes} workers...")
     validation_count = stage_validation_audio(input_root, exp_dir)
     if validation_count:
         print(
@@ -1147,12 +1160,19 @@ def preprocess_training_set(
         worker = process_audio_wrapper
 
     active_workers = max(1, min(num_processes, len(work_items)))
-    pp.audio_write_workers = max(
-        1,
-        min(
-            AUDIO_WRITE_MAX_WORKERS,
-            multiprocessing.cpu_count() // active_workers,
-        ),
+    if use_fireredvad_gpu:
+        active_workers = min(active_workers, GPU_PREPROCESS_MAX_WORKERS)
+    print(f"Starting preprocess with {active_workers} workers...")
+    pp.audio_write_workers = (
+        1
+        if use_fireredvad_gpu
+        else max(
+            1,
+            min(
+                AUDIO_WRITE_MAX_WORKERS,
+                multiprocessing.cpu_count() // active_workers,
+            ),
+        )
     )
     print(f"Audio output pipeline: {pp.audio_write_workers} workers per source")
     executor_class = (
@@ -1162,7 +1182,7 @@ def preprocess_training_set(
     )
     try:
         with tqdm(total=len(work_items)) as pbar:
-            with executor_class(max_workers=num_processes) as executor:
+            with executor_class(max_workers=active_workers) as executor:
                 futures = [
                     executor.submit(worker, work_item) for work_item in work_items
                 ]
