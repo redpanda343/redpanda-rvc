@@ -55,6 +55,7 @@ VALIDATION_AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 AUDIO_WRITE_MAX_WORKERS = 8
 AUDIO_WRITE_PENDING_MULTIPLIER = 2
 GPU_PREPROCESS_MAX_WORKERS = 4
+PROCESS_PENDING_MULTIPLIER = 2
 FLAC_COMPRESSION_LEVEL = 0.0
 RESAMPLE_LOWPASS_FILTER_WIDTH = 128
 RESAMPLE_STREAM_CONTEXT_SECONDS = 1.0
@@ -62,6 +63,7 @@ SIMPLE_SILENCE_THRESHOLD_DB = -45.0
 SIMPLE_MIN_SILENCE_SECONDS = 0.3
 SIMPLE_TRUNCATE_TO_SECONDS = 0.3
 SIMPLE_BLEND_FRAMES = 100
+_RESAMPLER_CACHE = {}
 
 
 def normalize_dataset_format(dataset_format: str) -> str:
@@ -291,6 +293,11 @@ def _clean_audio_path(file: str) -> str:
 
 
 def _get_audio_sample_rate(file: str) -> int:
+    file = _clean_audio_path(file)
+    try:
+        return int(sf.info(file).samplerate)
+    except (RuntimeError, TypeError, ValueError, OSError):
+        pass
     command = [
         _ffmpeg_path(),
         "-nostdin",
@@ -301,7 +308,7 @@ def _get_audio_sample_rate(file: str) -> int:
         "-filter_threads",
         "1",
         "-i",
-        _clean_audio_path(file),
+        file,
         "-frames:a",
         "0",
         "-f",
@@ -321,6 +328,19 @@ def _get_audio_sample_rate(file: str) -> int:
     return int(sf.info(io.BytesIO(result.stdout)).samplerate)
 
 
+def _get_resampler(source_sample_rate: int, target_sample_rate: int):
+    key = (int(source_sample_rate), int(target_sample_rate))
+    resampler = _RESAMPLER_CACHE.get(key)
+    if resampler is None:
+        resampler = torchaudio.transforms.Resample(
+            orig_freq=source_sample_rate,
+            new_freq=target_sample_rate,
+            lowpass_filter_width=RESAMPLE_LOWPASS_FILTER_WIDTH,
+        )
+        _RESAMPLER_CACHE[key] = resampler
+    return resampler
+
+
 def _resample_audio(
     audio: np.ndarray,
     source_sample_rate: int,
@@ -333,11 +353,7 @@ def _resample_audio(
     if source_sample_rate == target_sample_rate:
         return audio
     if resampler is None:
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=source_sample_rate,
-            new_freq=target_sample_rate,
-            lowpass_filter_width=RESAMPLE_LOWPASS_FILTER_WIDTH,
-        )
+        resampler = _get_resampler(source_sample_rate, target_sample_rate)
     waveform = torch.from_numpy(audio).unsqueeze(0)
     with torch.inference_mode():
         output = resampler(waveform).squeeze(0)
@@ -512,10 +528,8 @@ class FFmpegAudioStreamReader:
         self.target_sample_rate = sample_rate
         self.resampler = None
         if self.source_sample_rate != self.target_sample_rate:
-            self.resampler = torchaudio.transforms.Resample(
-                orig_freq=self.source_sample_rate,
-                new_freq=self.target_sample_rate,
-                lowpass_filter_width=RESAMPLE_LOWPASS_FILTER_WIDTH,
+            self.resampler = _get_resampler(
+                self.source_sample_rate, self.target_sample_rate
             )
         self.buffer = np.empty(0, dtype=np.float32)
         self.buffer_start = 0
@@ -984,6 +998,22 @@ def save_dataset_duration(file_path, dataset_duration, dataset_format="wav"):
         json.dump(data, f, indent=4)
 
 
+_PROCESS_PREPROCESSOR = None
+
+
+def initialize_preprocess_worker(
+    sr, exp_dir, dataset_format, audio_write_workers, torch_threads
+):
+    global _PROCESS_PREPROCESSOR
+    torch.set_num_threads(max(1, int(torch_threads)))
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    _PROCESS_PREPROCESSOR = PreProcess(sr, exp_dir, dataset_format, False)
+    _PROCESS_PREPROCESSOR.audio_write_workers = max(1, int(audio_write_workers))
+
+
 def process_audio_wrapper(args):
     (
         pp,
@@ -996,6 +1026,10 @@ def process_audio_wrapper(args):
         overlap_len,
         normalization_mode,
     ) = args
+    if pp is None:
+        pp = _PROCESS_PREPROCESSOR
+        if pp is None:
+            raise RuntimeError("Preprocess worker is not initialized")
     file_path, idx0, sid = file
     return pp.process_audio(
         file_path,
@@ -1028,6 +1062,10 @@ def process_simple_audio_wrapper(args):
         truncate_silence_to_seconds,
         truncate_silence_minimum_seconds,
     ) = args
+    if pp is None:
+        pp = _PROCESS_PREPROCESSOR
+        if pp is None:
+            raise RuntimeError("Preprocess worker is not initialized")
     return pp.process_simple_audio(
         path,
         idx0,
@@ -1118,13 +1156,28 @@ def preprocess_training_set(
         print("FireRedVAD inference: CUDA")
     elif uses_fireredvad:
         print("FireRedVAD inference: CPU")
+    try:
+        available_cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available_cpus = multiprocessing.cpu_count()
+    available_cpus = max(1, int(available_cpus))
+    active_workers = max(1, min(num_processes, len(files), available_cpus))
+    if use_fireredvad_gpu:
+        active_workers = min(active_workers, GPU_PREPROCESS_MAX_WORKERS)
+    print(f"Starting preprocess with {active_workers} workers...")
     pp = PreProcess(sr, exp_dir, dataset_format, use_fireredvad_gpu)
+    pp.audio_write_workers = (
+        min(AUDIO_WRITE_MAX_WORKERS, available_cpus)
+        if not use_fireredvad_gpu and active_workers == 1
+        else 1
+    )
+    print(f"Audio output pipeline: {pp.audio_write_workers} workers per source")
+    work_pp = pp if use_fireredvad_gpu else None
 
-    process_results = []
     if cut_preprocess == "Simple":
         work_items = [
             (
-                pp,
+                work_pp,
                 file_path,
                 idx0,
                 sid,
@@ -1145,7 +1198,7 @@ def preprocess_training_set(
     else:
         work_items = [
             (
-                pp,
+                work_pp,
                 file,
                 cut_preprocess,
                 process_effects,
@@ -1159,42 +1212,54 @@ def preprocess_training_set(
         ]
         worker = process_audio_wrapper
 
-    active_workers = max(1, min(num_processes, len(work_items)))
-    if use_fireredvad_gpu:
-        active_workers = min(active_workers, GPU_PREPROCESS_MAX_WORKERS)
-    print(f"Starting preprocess with {active_workers} workers...")
-    pp.audio_write_workers = (
-        1
-        if use_fireredvad_gpu
-        else max(
-            1,
-            min(
-                AUDIO_WRITE_MAX_WORKERS,
-                multiprocessing.cpu_count() // active_workers,
-            ),
-        )
-    )
-    print(f"Audio output pipeline: {pp.audio_write_workers} workers per source")
     executor_class = (
         concurrent.futures.ThreadPoolExecutor
         if use_fireredvad_gpu
         else concurrent.futures.ProcessPoolExecutor
     )
+    executor_kwargs = {}
+    if not use_fireredvad_gpu:
+        executor_kwargs = {
+            "initializer": initialize_preprocess_worker,
+            "initargs": (
+                sr,
+                exp_dir,
+                dataset_format,
+                pp.audio_write_workers,
+                max(1, available_cpus // active_workers),
+            ),
+        }
+    max_pending = max(active_workers, active_workers * PROCESS_PENDING_MULTIPLIER)
+    audio_length = 0.0
+    skipped_short_outputs = 0
     try:
         with tqdm(total=len(work_items)) as pbar:
-            with executor_class(max_workers=active_workers) as executor:
-                futures = [
-                    executor.submit(worker, work_item) for work_item in work_items
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    process_results.append(future.result())
-                    pbar.update(1)
+            with executor_class(
+                max_workers=active_workers, **executor_kwargs
+            ) as executor:
+                work_iterator = iter(work_items)
+                pending = set()
+                for _ in range(min(max_pending, len(work_items))):
+                    pending.add(executor.submit(worker, next(work_iterator)))
+                while pending:
+                    done, pending = concurrent.futures.wait(
+                        pending,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        result = future.result()
+                        audio_length += result[0]
+                        skipped_short_outputs += result[1]
+                        pbar.update(1)
+                        try:
+                            work_item = next(work_iterator)
+                        except StopIteration:
+                            continue
+                        pending.add(executor.submit(worker, work_item))
     finally:
         if use_fireredvad_gpu:
             shutdown_fireredvad_gpu()
 
-    audio_length = sum(result[0] for result in process_results)
-    skipped_short_outputs = sum(result[1] for result in process_results)
     save_dataset_duration(
         os.path.join(exp_dir, "model_info.json"),
         dataset_duration=audio_length,
