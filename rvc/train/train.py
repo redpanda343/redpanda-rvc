@@ -190,7 +190,7 @@ except FileNotFoundError:
 config.data.training_files = os.path.join(experiment_dir, "filelist.txt")
 
 torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 try:
     torch.backends.cuda.matmul.fp32_precision = "ieee"
     torch.backends.cudnn.fp32_precision = "ieee"
