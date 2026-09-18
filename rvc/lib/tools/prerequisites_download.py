@@ -230,6 +230,23 @@ def download_mapping_files(file_mapping_list, global_bar):
             for file in file_list:
                 destination_path = os.path.join(local_folder, file)
                 if not _file_is_valid(remote_folder, file, destination_path):
+                    expected_sha256 = expected_sha256_mapping.get((remote_folder, file))
+                    if (
+                        remote_folder == "embedders/contentvec/"
+                        and expected_sha256 is not None
+                        and os.path.isfile(destination_path)
+                        and os.path.getsize(destination_path) > 0
+                    ):
+                        if file == "pytorch_model.bin":
+                            print(
+                                "ContentVec checkpoint SHA-256 mismatch; "
+                                "replacing it with Applio's checkpoint."
+                            )
+                        elif file == "config.json":
+                            print(
+                                "ContentVec config SHA-256 mismatch; "
+                                "replacing it with Applio's config."
+                            )
                     url = get_download_url(remote_folder, file)
                     futures.append(
                         executor.submit(
