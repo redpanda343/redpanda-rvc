@@ -1,5 +1,7 @@
+import hashlib
 import os
 import sys
+import tempfile
 import soxr
 import librosa
 import soundfile as sf
@@ -99,6 +101,46 @@ def format_title(title):
     return formatted_title
 
 
+CONTENTVEC_SHA256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+
+
+def _sha256(file_path):
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _download_file(url, destination_path, expected_sha256=None):
+    directory = os.path.dirname(destination_path)
+    os.makedirs(directory, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=directory,
+            prefix=f".{os.path.basename(destination_path)}.",
+            suffix=".part",
+        ) as temporary_file:
+            temporary_path = temporary_file.name
+
+        print(f"Downloading {url} to {directory}...")
+        wget.download(url, out=temporary_path)
+
+        if expected_sha256 is not None and _sha256(temporary_path) != expected_sha256:
+            raise RuntimeError(
+                f"Checksum verification failed for {destination_path}. "
+                "The downloaded ContentVec checkpoint does not match Applio."
+            )
+
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
 def load_embedding(embedder_model):
     embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
     rvc_contentvec_base_url = (
@@ -118,7 +160,6 @@ def load_embedding(embedder_model):
         "contentvec": f"{rvc_contentvec_base_url}/config.json",
         "spin-v2": "https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/spin-v2/config.json",
     }
-    preprocessor_config_files = {}
 
     if embedder_model not in embedding_list:
         raise ValueError(f"Unsupported embedder model: {embedder_model}")
@@ -127,24 +168,32 @@ def load_embedding(embedder_model):
     json_file = os.path.join(model_path, "config.json")
     preprocessor_json_file = os.path.join(model_path, "preprocessor_config.json")
     os.makedirs(model_path, exist_ok=True)
-    if not os.path.exists(bin_file):
-        url = online_embedders[embedder_model]
-        print(f"Downloading {url} to {model_path}...")
-        wget.download(url, out=bin_file)
+
+    if embedder_model == "contentvec":
+        if os.path.isfile(preprocessor_json_file):
+            os.remove(preprocessor_json_file)
+            print(f"Removed legacy ContentVec preprocessor config: {preprocessor_json_file}")
+
+        checkpoint_is_valid = (
+            os.path.isfile(bin_file)
+            and os.path.getsize(bin_file) > 0
+            and _sha256(bin_file) == CONTENTVEC_SHA256
+        )
+        if not checkpoint_is_valid:
+            if os.path.exists(bin_file):
+                print("ContentVec checkpoint SHA-256 mismatch; replacing it with Applio's checkpoint.")
+            _download_file(
+                online_embedders[embedder_model],
+                bin_file,
+                expected_sha256=CONTENTVEC_SHA256,
+            )
+    elif not os.path.exists(bin_file):
+        _download_file(online_embedders[embedder_model], bin_file)
+
     if not os.path.exists(json_file):
-        url = config_files[embedder_model]
-        print(f"Downloading {url} to {model_path}...")
-        wget.download(url, out=json_file)
-    if (
-        embedder_model in preprocessor_config_files
-        and not os.path.exists(preprocessor_json_file)
-    ):
-        url = preprocessor_config_files[embedder_model]
-        print(f"Downloading {url} to {model_path}...")
-        wget.download(url, out=preprocessor_json_file)
+        _download_file(config_files[embedder_model], json_file)
 
     models = HubertModelWithFinalProj.from_pretrained(model_path)
-    preprocessor_json_file = os.path.join(model_path, "preprocessor_config.json")
     if os.path.isfile(preprocessor_json_file):
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             model_path, local_files_only=True
