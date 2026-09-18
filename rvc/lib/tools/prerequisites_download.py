@@ -74,7 +74,14 @@ remote_base_mapping = {
     "utmosv2/": "https://huggingface.co/sarulab-speech/UTMOSv2/resolve/main/",
 }
 
+CONTENTVEC_SHA256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+CONTENTVEC_PREPROCESSOR_PATH = (
+    "rvc/models/embedders/contentvec/preprocessor_config.json"
+)
+
+
 expected_sha256_mapping = {
+    ("embedders/contentvec/", "pytorch_model.bin"): CONTENTVEC_SHA256,
     ("FireRedVAD/AED/", "cmvn.ark"): (
         "c87f6f13edf0f0ec7535ddfc9cc3387d9268cb234b70182d566c5e2edf3ca473"
     ),
@@ -279,6 +286,12 @@ def prequisites_download_pipeline(
     """
     Manage the download pipeline for different categories of files.
     """
+    if os.path.isfile(CONTENTVEC_PREPROCESSOR_PATH):
+        os.remove(CONTENTVEC_PREPROCESSOR_PATH)
+        print(
+            f"Removed legacy ContentVec preprocessor config: "
+            f"{CONTENTVEC_PREPROCESSOR_PATH}"
+        )
     total_size = calculate_total_size(
         pretraineds_hifigan_list if pretraineds_hifigan else [],
         models,
