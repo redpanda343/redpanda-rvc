@@ -102,7 +102,7 @@ def format_title(title):
 def load_embedding(embedder_model):
     embedder_root = os.path.join(now_dir, "rvc", "models", "embedders")
     rvc_contentvec_base_url = (
-        "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base"
+        "https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/contentvec"
     )
     embedding_list = {
         "contentvec": os.path.join(embedder_root, "contentvec"),
@@ -118,9 +118,7 @@ def load_embedding(embedder_model):
         "contentvec": f"{rvc_contentvec_base_url}/config.json",
         "spin-v2": "https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/spin-v2/config.json",
     }
-    preprocessor_config_files = {
-        "contentvec": f"{rvc_contentvec_base_url}/preprocessor_config.json",
-    }
+    preprocessor_config_files = {}
 
     if embedder_model not in embedding_list:
         raise ValueError(f"Unsupported embedder model: {embedder_model}")
