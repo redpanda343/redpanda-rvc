@@ -75,6 +75,7 @@ remote_base_mapping = {
 }
 
 CONTENTVEC_SHA256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+CONTENTVEC_CONFIG_SHA256 = "2ddde063b795d38d9051a7215a092fecf4cfe148b54251e38de51d88d356898b"
 CONTENTVEC_PREPROCESSOR_PATH = (
     "rvc/models/embedders/contentvec/preprocessor_config.json"
 )
@@ -82,6 +83,7 @@ CONTENTVEC_PREPROCESSOR_PATH = (
 
 expected_sha256_mapping = {
     ("embedders/contentvec/", "pytorch_model.bin"): CONTENTVEC_SHA256,
+    ("embedders/contentvec/", "config.json"): CONTENTVEC_CONFIG_SHA256,
     ("FireRedVAD/AED/", "cmvn.ark"): (
         "c87f6f13edf0f0ec7535ddfc9cc3387d9268cb234b70182d566c5e2edf3ca473"
     ),
