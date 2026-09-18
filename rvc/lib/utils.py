@@ -102,6 +102,7 @@ def format_title(title):
 
 
 CONTENTVEC_SHA256 = "d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e"
+CONTENTVEC_CONFIG_SHA256 = "2ddde063b795d38d9051a7215a092fecf4cfe148b54251e38de51d88d356898b"
 
 
 def _sha256(file_path):
@@ -131,7 +132,7 @@ def _download_file(url, destination_path, expected_sha256=None):
         if expected_sha256 is not None and _sha256(temporary_path) != expected_sha256:
             raise RuntimeError(
                 f"Checksum verification failed for {destination_path}. "
-                "The downloaded ContentVec checkpoint does not match Applio."
+                "The downloaded ContentVec file does not match Applio."
             )
 
         os.replace(temporary_path, destination_path)
@@ -187,11 +188,25 @@ def load_embedding(embedder_model):
                 bin_file,
                 expected_sha256=CONTENTVEC_SHA256,
             )
-    elif not os.path.exists(bin_file):
-        _download_file(online_embedders[embedder_model], bin_file)
 
-    if not os.path.exists(json_file):
-        _download_file(config_files[embedder_model], json_file)
+        config_is_valid = (
+            os.path.isfile(json_file)
+            and os.path.getsize(json_file) > 0
+            and _sha256(json_file) == CONTENTVEC_CONFIG_SHA256
+        )
+        if not config_is_valid:
+            if os.path.exists(json_file):
+                print("ContentVec config SHA-256 mismatch; replacing it with Applio's config.")
+            _download_file(
+                config_files[embedder_model],
+                json_file,
+                expected_sha256=CONTENTVEC_CONFIG_SHA256,
+            )
+    else:
+        if not os.path.exists(bin_file):
+            _download_file(online_embedders[embedder_model], bin_file)
+        if not os.path.exists(json_file):
+            _download_file(config_files[embedder_model], json_file)
 
     models = HubertModelWithFinalProj.from_pretrained(model_path)
     if os.path.isfile(preprocessor_json_file):
