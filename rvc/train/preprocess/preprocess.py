@@ -765,14 +765,13 @@ class PreProcess:
                 chunk = audio[i : i + chunk_length]
                 if normalization_mode == "post":
                     chunk = self._peak_normalize_audio(chunk, normalization_gain)
-                if len(chunk) == chunk_length:
-                    writer.submit(
-                        self.gt_wavs_dir,
-                        f"{sid}_{idx0}_{i // (chunk_length - overlap_length)}",
-                        self.sr,
-                        chunk,
-                        self.dataset_format,
-                    )
+                writer.submit(
+                    self.gt_wavs_dir,
+                    f"{sid}_{idx0}_{i // (chunk_length - overlap_length)}",
+                    self.sr,
+                    chunk,
+                    self.dataset_format,
+                )
                 i += chunk_length - overlap_length
         return writer.skipped_short
 
