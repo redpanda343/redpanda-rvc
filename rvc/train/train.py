@@ -994,25 +994,9 @@ def train_and_evaluate(
                 )
                 loss_mel = fn_mel_loss(wave_mel, y_hat_mel) * config.train.c_mel
                 loss_kl = (
-                    kl_loss(
-                        z_p.float(),
-                        logs_q.float(),
-                        m_p.float(),
-                        logs_p.float(),
-                        z_mask.float(),
-                    )
-                    * config.train.c_kl
+                    kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * config.train.c_kl
                 )
-                loss_fm = feature_loss(
-                    [
-                        [real_feature.float().detach() for real_feature in disc]
-                        for disc in fmap_r
-                    ],
-                    [
-                        [generated_feature.float() for generated_feature in disc]
-                        for disc in fmap_g
-                    ],
-                )
+                loss_fm = feature_loss(fmap_r, fmap_g)
             loss_gen, _ = generator_loss(y_d_hat_g)
             loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
             optim_g.zero_grad()
