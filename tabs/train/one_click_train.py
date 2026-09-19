@@ -50,6 +50,8 @@ DEFAULT_TRAINING_PRESETS = {
         "truncate_silence_threshold_db": -45,
         "truncate_silence_minimum_seconds": 0.3,
         "truncate_silence_to_seconds": 0.3,
+        "truncate_silence_action": "truncate",
+        "truncate_silence_compress_percent": 50.0,
         "g_pretrained_path": None,
         "d_pretrained_path": None,
         "cpu_cores": max(1, min(cpu_count() // 2, 32)),
@@ -79,6 +81,8 @@ DEFAULT_TRAINING_PRESETS = {
         "truncate_silence_threshold_db": -45,
         "truncate_silence_minimum_seconds": 0.3,
         "truncate_silence_to_seconds": 0.3,
+        "truncate_silence_action": "truncate",
+        "truncate_silence_compress_percent": 50.0,
         "g_pretrained_path": None,
         "d_pretrained_path": None,
         "cpu_cores": max(1, min(cpu_count() // 2, 32)),
@@ -97,7 +101,11 @@ def _load_custom_presets():
     if not isinstance(presets, dict):
         return {}
     defaults = next(iter(DEFAULT_TRAINING_PRESETS.values()))
-    required_fields = set(defaults) - {"vocoder"}
+    required_fields = set(defaults) - {
+        "vocoder",
+        "truncate_silence_action",
+        "truncate_silence_compress_percent",
+    }
     loaded_presets = {}
     for name, settings in presets.items():
         if (
@@ -153,7 +161,15 @@ def _apply_preset(preset_name):
         preset["truncate_silence_enabled"],
         preset["truncate_silence_threshold_db"],
         preset["truncate_silence_minimum_seconds"],
-        preset["truncate_silence_to_seconds"],
+        gr.update(
+            value=preset["truncate_silence_to_seconds"],
+            visible=preset["truncate_silence_action"] == "truncate",
+        ),
+        preset["truncate_silence_action"],
+        gr.update(
+            value=preset["truncate_silence_compress_percent"],
+            visible=preset["truncate_silence_action"] == "compress",
+        ),
         preset["g_pretrained_path"],
         preset["d_pretrained_path"],
         preset["cpu_cores"],
@@ -192,6 +208,8 @@ def _save_custom_preset(
     truncate_silence_threshold_db,
     truncate_silence_minimum_seconds,
     truncate_silence_to_seconds,
+    truncate_silence_action,
+    truncate_silence_compress_percent,
     g_pretrained_path,
     d_pretrained_path,
     cpu_cores,
@@ -233,6 +251,10 @@ def _save_custom_preset(
             truncate_silence_minimum_seconds
         ),
         "truncate_silence_to_seconds": float(truncate_silence_to_seconds),
+        "truncate_silence_action": str(truncate_silence_action),
+        "truncate_silence_compress_percent": float(
+            truncate_silence_compress_percent
+        ),
         "g_pretrained_path": g_pretrained_path or None,
         "d_pretrained_path": d_pretrained_path or None,
         "cpu_cores": int(cpu_cores),
@@ -284,6 +306,13 @@ def _truncate_settings_visibility(truncate_silence_enabled, cut_preprocess):
     )
 
 
+def _truncate_action_visibility(action):
+    return (
+        gr.update(visible=action == "truncate"),
+        gr.update(visible=action == "compress"),
+    )
+
+
 def _custom_pretrained_visibility(pretrained_mode):
     return gr.update(visible=pretrained_mode == "Custom pretrained")
 
@@ -328,6 +357,8 @@ def _run_one_click_training(
     truncate_silence_threshold_db,
     truncate_silence_minimum_seconds,
     truncate_silence_to_seconds,
+    truncate_silence_action,
+    truncate_silence_compress_percent,
     cpu_cores,
     gpu,
     f0_method,
@@ -404,6 +435,8 @@ def _run_one_click_training(
         truncate_silence_threshold_db=truncate_silence_threshold_db,
         truncate_silence_to_seconds=truncate_silence_to_seconds,
         truncate_silence_minimum_seconds=truncate_silence_minimum_seconds,
+        truncate_silence_action=truncate_silence_action,
+        truncate_silence_compress_percent=truncate_silence_compress_percent,
     )
     if _failed(preprocess_message):
         gr.Warning(preprocess_message)
@@ -563,6 +596,15 @@ def one_click_train_tab():
                     interactive=True,
                 )
             with gr.Column(visible=False) as truncate_settings:
+                truncate_silence_action = gr.Radio(
+                    choices=[
+                        (i18n("Truncate Detected Silence"), "truncate"),
+                        (i18n("Compress Excess Silence"), "compress"),
+                    ],
+                    value="truncate",
+                    label=i18n("Silence action"),
+                    interactive=True,
+                )
                 with gr.Row():
                     truncate_silence_threshold_db = gr.Slider(
                         -80,
@@ -573,20 +615,29 @@ def one_click_train_tab():
                         interactive=True,
                     )
                     truncate_silence_minimum_seconds = gr.Slider(
-                        0.1,
+                        0.001,
                         5.0,
                         value=0.3,
-                        step=0.1,
+                        step=0.001,
                         label=i18n("Minimum silence (sec)"),
                         interactive=True,
                     )
                     truncate_silence_to_seconds = gr.Slider(
-                        0.1,
+                        0.0,
                         0.5,
                         value=0.3,
-                        step=0.1,
+                        step=0.001,
                         label=i18n("Truncate to (sec)"),
                         interactive=True,
+                    )
+                    truncate_silence_compress_percent = gr.Slider(
+                        0.0,
+                        99.9,
+                        value=50.0,
+                        step=0.1,
+                        label=i18n("Compress excess silence to (%)"),
+                        interactive=True,
+                        visible=False,
                     )
 
     with gr.Accordion(i18n("Feature Extraction"), open=False):
@@ -727,6 +778,8 @@ def one_click_train_tab():
         truncate_silence_threshold_db,
         truncate_silence_minimum_seconds,
         truncate_silence_to_seconds,
+        truncate_silence_action,
+        truncate_silence_compress_percent,
         g_pretrained_path,
         d_pretrained_path,
         cpu_cores,
@@ -768,6 +821,8 @@ def one_click_train_tab():
             truncate_silence_threshold_db,
             truncate_silence_minimum_seconds,
             truncate_silence_to_seconds,
+            truncate_silence_action,
+            truncate_silence_compress_percent,
             g_pretrained_path,
             d_pretrained_path,
             cpu_cores,
@@ -787,6 +842,15 @@ def one_click_train_tab():
         fn=_truncate_settings_visibility,
         inputs=[truncate_silence_enabled, cut_preprocess],
         outputs=[truncate_settings],
+        queue=False,
+    )
+    truncate_silence_action.input(
+        fn=_truncate_action_visibility,
+        inputs=[truncate_silence_action],
+        outputs=[
+            truncate_silence_to_seconds,
+            truncate_silence_compress_percent,
+        ],
         queue=False,
     )
     pretrained_mode.input(
@@ -819,6 +883,8 @@ def one_click_train_tab():
             truncate_silence_threshold_db,
             truncate_silence_minimum_seconds,
             truncate_silence_to_seconds,
+            truncate_silence_action,
+            truncate_silence_compress_percent,
             cpu_cores,
             gpu,
             f0_method,

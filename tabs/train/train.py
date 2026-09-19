@@ -314,6 +314,8 @@ def train_tab():
         truncate_silence_threshold_db,
         truncate_silence_to_seconds,
         truncate_silence_minimum_seconds,
+        truncate_silence_action,
+        truncate_silence_compress_percent,
     ):
         gr.Info(i18n("Preprocessing dataset..."))
         result = run_preprocess_script(
@@ -333,6 +335,8 @@ def train_tab():
             truncate_silence_threshold_db=truncate_silence_threshold_db,
             truncate_silence_to_seconds=truncate_silence_to_seconds,
             truncate_silence_minimum_seconds=truncate_silence_minimum_seconds,
+            truncate_silence_action=truncate_silence_action,
+            truncate_silence_compress_percent=truncate_silence_compress_percent,
         )
         if isinstance(result, str):
             if "error" in result.lower() or "failed" in result.lower():
@@ -518,6 +522,16 @@ def train_tab():
                 interactive=True,
                 visible=False,
             )
+            truncate_silence_action = gr.Radio(
+                choices=[
+                    (i18n("Truncate Detected Silence"), "truncate"),
+                    (i18n("Compress Excess Silence"), "compress"),
+                ],
+                value="truncate",
+                label=i18n("Silence action"),
+                interactive=True,
+                visible=False,
+            )
             truncate_silence_threshold_db = gr.Slider(
                 minimum=-80,
                 maximum=-20,
@@ -532,10 +546,10 @@ def train_tab():
                 visible=False,
             )
             truncate_silence_minimum_seconds = gr.Slider(
-                minimum=0.1,
+                minimum=0.001,
                 maximum=5.0,
                 value=0.3,
-                step=0.1,
+                step=0.001,
                 label=i18n("Minimum silence (sec)"),
                 info=i18n(
                     "For Simple slicing only. A silent region must be at least "
@@ -545,14 +559,27 @@ def train_tab():
                 visible=False,
             )
             truncate_silence_to_seconds = gr.Slider(
-                minimum=0.1,
+                minimum=0.0,
                 maximum=0.5,
                 value=0.3,
-                step=0.1,
+                step=0.001,
                 label=i18n("Truncate to (sec)"),
                 info=i18n(
                     "For Simple slicing only. Sets how much of each qualifying "
                     "silent region remains after truncation."
+                ),
+                interactive=True,
+                visible=False,
+            )
+            truncate_silence_compress_percent = gr.Slider(
+                minimum=0.0,
+                maximum=99.9,
+                value=50.0,
+                step=0.1,
+                label=i18n("Compress excess silence to (%)"),
+                info=i18n(
+                    "Keeps the minimum silence plus this percentage of the "
+                    "silence beyond that minimum."
                 ),
                 interactive=True,
                 visible=False,
@@ -650,6 +677,8 @@ def train_tab():
                     truncate_silence_threshold_db,
                     truncate_silence_to_seconds,
                     truncate_silence_minimum_seconds,
+                    truncate_silence_action,
+                    truncate_silence_compress_percent,
                 ],
                 outputs=[preprocess_output_info],
             )
@@ -1024,21 +1053,39 @@ def train_tab():
             def update_slider_visibility(noise_reduction):
                 return gr.update(visible=noise_reduction)
 
-            def update_truncate_silence_visibility(cut_method, truncate_enabled):
+            def update_truncate_silence_visibility(
+                cut_method, truncate_enabled, action
+            ):
                 simple_selected = cut_method == "Simple"
+                settings_visible = simple_selected and truncate_enabled
                 return (
                     gr.update(visible=simple_selected),
-                    gr.update(visible=simple_selected and truncate_enabled),
-                    gr.update(visible=simple_selected and truncate_enabled),
-                    gr.update(visible=simple_selected and truncate_enabled),
+                    gr.update(visible=settings_visible),
+                    gr.update(visible=settings_visible),
+                    gr.update(visible=settings_visible),
+                    gr.update(visible=settings_visible and action == "truncate"),
+                    gr.update(visible=settings_visible and action == "compress"),
                 )
 
-            def update_truncate_controls_visibility(truncate_enabled, cut_method):
+            def update_truncate_controls_visibility(
+                truncate_enabled, cut_method, action
+            ):
                 visible = truncate_enabled and cut_method == "Simple"
                 return (
                     gr.update(visible=visible),
                     gr.update(visible=visible),
                     gr.update(visible=visible),
+                    gr.update(visible=visible and action == "truncate"),
+                    gr.update(visible=visible and action == "compress"),
+                )
+
+            def update_truncate_action_visibility(
+                action, truncate_enabled, cut_method
+            ):
+                visible = truncate_enabled and cut_method == "Simple"
+                return (
+                    gr.update(visible=visible and action == "truncate"),
+                    gr.update(visible=visible and action == "compress"),
                 )
 
             noise_reduction.change(
@@ -1048,21 +1095,45 @@ def train_tab():
             )
             cut_preprocess.change(
                 fn=update_truncate_silence_visibility,
-                inputs=[cut_preprocess, truncate_silence_enabled],
+                inputs=[
+                    cut_preprocess,
+                    truncate_silence_enabled,
+                    truncate_silence_action,
+                ],
                 outputs=[
                     truncate_silence_enabled,
+                    truncate_silence_action,
                     truncate_silence_threshold_db,
-                    truncate_silence_to_seconds,
                     truncate_silence_minimum_seconds,
+                    truncate_silence_to_seconds,
+                    truncate_silence_compress_percent,
                 ],
             )
             truncate_silence_enabled.change(
                 fn=update_truncate_controls_visibility,
-                inputs=[truncate_silence_enabled, cut_preprocess],
+                inputs=[
+                    truncate_silence_enabled,
+                    cut_preprocess,
+                    truncate_silence_action,
+                ],
                 outputs=[
+                    truncate_silence_action,
                     truncate_silence_threshold_db,
-                    truncate_silence_to_seconds,
                     truncate_silence_minimum_seconds,
+                    truncate_silence_to_seconds,
+                    truncate_silence_compress_percent,
+                ],
+            )
+            truncate_silence_action.change(
+                fn=update_truncate_action_visibility,
+                inputs=[
+                    truncate_silence_action,
+                    truncate_silence_enabled,
+                    cut_preprocess,
+                ],
+                outputs=[
+                    truncate_silence_to_seconds,
+                    truncate_silence_compress_percent,
                 ],
             )
             architecture.change(

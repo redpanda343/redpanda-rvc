@@ -489,6 +489,8 @@ def run_preprocess_script(
     truncate_silence_threshold_db: float = -45.0,
     truncate_silence_to_seconds: float = 0.3,
     truncate_silence_minimum_seconds: float = 0.3,
+    truncate_silence_action: str = "truncate",
+    truncate_silence_compress_percent: float = 50.0,
 ):
     preprocess_script_path = os.path.join("rvc", "train", "preprocess", "preprocess.py")
     command = [
@@ -513,6 +515,8 @@ def run_preprocess_script(
                 truncate_silence_threshold_db,
                 truncate_silence_to_seconds,
                 truncate_silence_minimum_seconds,
+                truncate_silence_action,
+                truncate_silence_compress_percent,
             ],
         ),
     ]
@@ -1215,7 +1219,7 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--truncate-silence-to-seconds",
-    type=click.FloatRange(0.1, 0.5),
+    type=click.FloatRange(0.0, 0.5),
     default=0.3,
     show_default=True,
     help="Length retained from qualifying silence during Simple slicing.",
@@ -1223,10 +1227,26 @@ def batch_infer(**kwargs):
 )
 @click.option(
     "--truncate-silence-minimum-seconds",
-    type=click.FloatRange(0.1, 5.0),
+    type=click.FloatRange(0.001, 5.0),
     default=0.3,
     show_default=True,
     help="Minimum silence duration detected during Simple slicing.",
+    hidden=True,
+)
+@click.option(
+    "--truncate-silence-action",
+    type=click.Choice(["truncate", "compress"]),
+    default="truncate",
+    show_default=True,
+    help="Audacity-style action used for qualifying silence.",
+    hidden=True,
+)
+@click.option(
+    "--truncate-silence-compress-percent",
+    type=click.FloatRange(0.0, 99.9),
+    default=50.0,
+    show_default=True,
+    help="Percentage of excess silence retained in compress mode.",
     hidden=True,
 )
 def preprocess(**kwargs):
@@ -1254,6 +1274,10 @@ def preprocess(**kwargs):
         truncate_silence_to_seconds=kwargs["truncate_silence_to_seconds"],
         truncate_silence_minimum_seconds=kwargs[
             "truncate_silence_minimum_seconds"
+        ],
+        truncate_silence_action=kwargs["truncate_silence_action"],
+        truncate_silence_compress_percent=kwargs[
+            "truncate_silence_compress_percent"
         ],
     )
     click.echo(result)
