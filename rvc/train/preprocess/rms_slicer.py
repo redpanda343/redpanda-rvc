@@ -1,6 +1,9 @@
 import numpy as np
 
 
+RMS_FRAMES_PER_CHUNK = 4096
+
+
 class Slicer:
     def __init__(
         self,
@@ -133,7 +136,7 @@ class Slicer:
         return chunks
 
 
-def get_rms(y, frame_length=2048, hop_length=512, pad_mode="constant"):
+def _legacy_get_rms(y, frame_length, hop_length, pad_mode):
     padding = (int(frame_length // 2), int(frame_length // 2))
     y = np.pad(y, padding, mode=pad_mode)
     axis = -1
@@ -149,3 +152,59 @@ def get_rms(y, frame_length=2048, hop_length=512, pad_mode="constant"):
     x = xw[tuple(slices)]
     power = np.mean(np.abs(x) ** 2, axis=-2, keepdims=True)
     return np.sqrt(power)
+
+
+def get_rms(
+    y,
+    frame_length=2048,
+    hop_length=512,
+    pad_mode="constant",
+    frames_per_chunk=RMS_FRAMES_PER_CHUNK,
+):
+    y = np.asarray(y)
+    if y.ndim != 1:
+        return _legacy_get_rms(y, frame_length, hop_length, pad_mode)
+
+    half_frame = frame_length // 2
+    window_count = y.shape[0] + 2 * half_frame - frame_length + 1
+    if window_count <= 0:
+        return _legacy_get_rms(y, frame_length, hop_length, pad_mode)
+    total_frames = (window_count - 1) // hop_length + 1
+    padded = None
+    if pad_mode != "constant":
+        padded = np.pad(y, (half_frame, half_frame), mode=pad_mode)
+    power_chunks = []
+    for first_frame in range(0, total_frames, frames_per_chunk):
+        frame_count = min(frames_per_chunk, total_frames - first_frame)
+        if padded is not None:
+            padded_start = first_frame * hop_length
+            padded_end = (
+                (first_frame + frame_count - 1) * hop_length
+                + frame_length
+            )
+            block = padded[padded_start:padded_end]
+        else:
+            block_start = first_frame * hop_length - half_frame
+            block_end = (
+                (first_frame + frame_count - 1) * hop_length
+                - half_frame
+                + frame_length
+            )
+            source_start = max(0, block_start)
+            source_end = min(y.shape[0], block_end)
+            block = y[source_start:source_end]
+            left_padding = source_start - block_start
+            right_padding = block_end - source_end
+            if left_padding or right_padding:
+                block = np.pad(
+                    block,
+                    (left_padding, right_padding),
+                    mode="constant",
+                )
+        frames = np.lib.stride_tricks.sliding_window_view(
+            block, frame_length
+        )[::hop_length]
+        power_chunks.append(np.mean(np.square(frames), axis=-1))
+
+    power = np.concatenate(power_chunks)
+    return np.sqrt(power)[np.newaxis, :]
