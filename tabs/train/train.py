@@ -496,7 +496,7 @@ def train_tab():
                 info=i18n(
                     "Format used for processed training slices."
                 ),
-                choices=["WAV", "WAV 32-bit float", "FLAC"],
+                choices=[("WAV 16-bit", "WAV"), "WAV 32-bit float", "FLAC"],
                 value="WAV",
                 interactive=True,
             )
