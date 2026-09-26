@@ -37,7 +37,7 @@ class Slicer:
 
     def slice(self, waveform):
         samples = waveform.mean(axis=0) if waveform.ndim > 1 else waveform
-        if samples.shape[0] <= self.min_length:
+        if (samples.shape[0] + self.hop_size - 1) // self.hop_size <= self.min_length:
             return [waveform]
 
         rms_list = get_rms(
