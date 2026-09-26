@@ -612,9 +612,9 @@ def train_tab():
                     info=i18n(
                         "Removes DC-offset from the dataset. Disable this if your dataset has no DC-offset or has already been passed through a high-pass filter."
                     ),
-                    value=True,
+                    value=False,
                     interactive=True,
-                    visible=True,
+                    visible=False,
                 )
 
                 normalization_mode = gr.Radio(
@@ -623,9 +623,9 @@ def train_tab():
                         "Audio normalization: Select 'none' if the files are already normalized, 'pre' to normalize the entire input file at once, or 'post' to normalize each slice individually."
                     ),
                     choices=["none", "pre", "post"],
-                    value="post",
+                    value="none",
                     interactive=True,
-                    visible=True,
+                    visible=False,
                 )
 
                 noise_reduction = gr.Checkbox(

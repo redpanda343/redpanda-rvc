@@ -34,9 +34,9 @@ DEFAULT_TRAINING_PRESETS = {
         "total_epoch": 200,
         "save_every_epoch": 10,
         "cut_preprocess": "Automatic",
-        "normalization_mode": "post",
+        "normalization_mode": "none",
         "dataset_format": "WAV",
-        "process_effects": True,
+        "process_effects": False,
         "f0_method": "rmvpe",
         "embedder_model": "contentvec",
         "include_mutes": 2,
@@ -65,9 +65,9 @@ DEFAULT_TRAINING_PRESETS = {
         "total_epoch": 2000,
         "save_every_epoch": 10,
         "cut_preprocess": "Automatic",
-        "normalization_mode": "post",
+        "normalization_mode": "none",
         "dataset_format": "WAV",
-        "process_effects": True,
+        "process_effects": False,
         "f0_method": "rmvpe",
         "embedder_model": "contentvec",
         "include_mutes": 0,
@@ -146,9 +146,9 @@ def _apply_preset(preset_name):
         preset["total_epoch"],
         preset["save_every_epoch"],
         preset["cut_preprocess"],
-        preset["normalization_mode"],
+        "none",
         preset["dataset_format"],
-        preset["process_effects"],
+        False,
         preset["f0_method"],
         preset["embedder_model"],
         preset["include_mutes"],
@@ -557,9 +557,10 @@ def one_click_train_tab():
             )
             normalization_mode = gr.Radio(
                 choices=["none", "pre", "post"],
-                value="post",
+                value="none",
                 label=i18n("Normalization mode"),
                 interactive=True,
+                visible=False,
             )
             dataset_format = gr.Radio(
                 choices=["WAV", "WAV 32-bit float", "FLAC"],
@@ -568,9 +569,10 @@ def one_click_train_tab():
                 interactive=True,
             )
         process_effects = gr.Checkbox(
-            value=True,
+            value=False,
             label=i18n("DC-offset removal"),
             interactive=True,
+            visible=False,
         )
         with gr.Column(visible=False) as simple_settings:
             with gr.Row():
