@@ -71,11 +71,13 @@ _RESAMPLER_CACHE = {}
 
 def normalize_dataset_format(dataset_format: str) -> str:
     normalized_format = str(dataset_format).strip().lower()
+    if normalized_format == "wav 16-bit":
+        normalized_format = "wav"
     if normalized_format == "wav 32-bit float":
         normalized_format = "wav_float32"
     if normalized_format not in SUPPORTED_DATASET_FORMATS:
         raise ValueError(
-            f"Unsupported dataset format '{dataset_format}'. Expected WAV, WAV 32-bit float, or FLAC."
+            f"Unsupported dataset format '{dataset_format}'. Expected WAV 16-bit, WAV 32-bit float, or FLAC."
         )
     return normalized_format
 

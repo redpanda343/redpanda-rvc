@@ -496,8 +496,8 @@ def train_tab():
                 info=i18n(
                     "Format used for processed training slices."
                 ),
-                choices=[("WAV 16-bit", "WAV"), "WAV 32-bit float", "FLAC"],
-                value="WAV",
+                choices=["WAV 16-bit", "WAV 32-bit float", "FLAC"],
+                value="WAV 16-bit",
                 interactive=True,
             )
             cut_preprocess = gr.Radio(

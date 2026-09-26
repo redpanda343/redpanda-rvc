@@ -35,7 +35,7 @@ DEFAULT_TRAINING_PRESETS = {
         "save_every_epoch": 10,
         "cut_preprocess": "Automatic",
         "normalization_mode": "none",
-        "dataset_format": "WAV",
+        "dataset_format": "WAV 16-bit",
         "process_effects": False,
         "f0_method": "rmvpe",
         "embedder_model": "contentvec",
@@ -66,7 +66,7 @@ DEFAULT_TRAINING_PRESETS = {
         "save_every_epoch": 10,
         "cut_preprocess": "Automatic",
         "normalization_mode": "none",
-        "dataset_format": "WAV",
+        "dataset_format": "WAV 16-bit",
         "process_effects": False,
         "f0_method": "rmvpe",
         "embedder_model": "contentvec",
@@ -116,6 +116,8 @@ def _load_custom_presets():
             and name not in DEFAULT_TRAINING_PRESETS
         ):
             loaded_settings = defaults | settings
+            if loaded_settings["dataset_format"] == "WAV":
+                loaded_settings["dataset_format"] = "WAV 16-bit"
             if loaded_settings["cut_preprocess"] == "Simple":
                 loaded_settings["cut_preprocess"] = "Automatic"
             loaded_presets[name] = loaded_settings
@@ -563,8 +565,8 @@ def one_click_train_tab():
                 visible=False,
             )
             dataset_format = gr.Radio(
-                choices=[("WAV 16-bit", "WAV"), "WAV 32-bit float", "FLAC"],
-                value="WAV",
+                choices=["WAV 16-bit", "WAV 32-bit float", "FLAC"],
+                value="WAV 16-bit",
                 label=i18n("Dataset format"),
                 interactive=True,
             )
